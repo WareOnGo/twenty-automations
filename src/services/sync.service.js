@@ -110,22 +110,30 @@ function changedQualifyingFields(prev, next) {
   return changed;
 }
 
-// Derive the deal's recipient list: creator first (primary To:), then owner,
-// then each assignee. Everything is resolved through the roster maps and
-// lowercased so there is exactly one canonical email per person; assignees with
-// no roster match fall back to the <firstname>@wareongo.com slug. Deduped.
+// Derive who "owns" this deal for briefing/compliance purposes: the people it
+// is ASSIGNED to (Twenty `assignedTo`). The owner/creator (synonymous here —
+// the first-touch POC who logged the deal) is used ONLY as a fallback when
+// there are no assignees, so creating a deal alone never lands it in your
+// briefing. Everything is resolved through the roster maps and lowercased to one
+// canonical email per person; assignees with no roster match fall back to the
+// <firstname>@wareongo.com slug. Deduped.
 function deriveAssigneeEmail(record, { byId, byFirstName }) {
   const emails = [];
   const push = (e) => {
     if (e) emails.push(String(e).trim().toLowerCase());
   };
 
-  push(byId.get(record?.createdBy?.workspaceMemberId));
-  push(byId.get(record?.ownerId));
   for (const name of record?.assignedTo ?? []) {
     const key = String(name).trim().toUpperCase();
     const slug = String(name).replace(/\s+/g, "").toLowerCase();
     push(byFirstName.get(key) || (slug ? `${slug}@wareongo.com` : null));
+  }
+
+  // Fallback only when nobody is assigned: attribute to the owner/creator.
+  // `ownerId` is often null on the record while createdBy is populated, so try
+  // both (they resolve to the same person).
+  if (emails.length === 0) {
+    push(byId.get(record?.ownerId) || byId.get(record?.createdBy?.workspaceMemberId));
   }
 
   const seen = new Set();

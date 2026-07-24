@@ -25,8 +25,9 @@ export const TABLE_STAGES = [
   ["AGREEMENT_WORK", "Agreement Work"],
   ["MONEY_COLLECTION", "Money Collection"],
 ];
-// Dropped / terminal stages excluded from active tracking + briefings.
-export const EXCLUDED_STAGES = ["RFQ_NOT_RELEVANT", "DEAL_LOST", "DEAL_CLOSED"];
+// Dropped / dormant / terminal stages excluded from active tracking + briefings.
+// DEAL_ON_HOLD is dormant (revisit at a future date), not actively worked.
+export const EXCLUDED_STAGES = ["RFQ_NOT_RELEVANT", "DEAL_LOST", "DEAL_CLOSED", "DEAL_ON_HOLD"];
 
 // A deal is "active" (tracked for compliance) if it is in one of these.
 export const ACTIVE_STAGES = [...CARD_STAGES, ...TABLE_STAGES.map((t) => t[0])];
