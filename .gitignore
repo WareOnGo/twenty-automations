@@ -14,3 +14,6 @@ sql/
 # Local-only working notes
 TODO.md
 TESTING.md
+
+# Rendered mail previews — contain real customer data, never commit
+preview/

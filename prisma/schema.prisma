@@ -7,19 +7,29 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// Local mirror of Twenty CRM opportunities, refreshed by the polling sync job.
+// `data` holds the latest depth=1 snapshot and is the source we diff against to
+// detect qualifying ("meaningful") MANUAL changes. The compliance clocks below
+// are computed by us — they are NOT Twenty's `updatedAt` (which misses note/task
+// additions and bumps on our own API writebacks).
 model Opportunity {
-  opportunityId            String    @id @map("opportunity_id")
-  data                     Json
-  stage                    String?
-  assigneeEmail            String?   @map("assignee_email")
-  lastActivityAt           DateTime  @default(now()) @map("last_activity_at") @db.Timestamptz(6)
-  createdAt                DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  reminder1hSent           Boolean   @default(false) @map("reminder_1h_sent")
-  reminder1dSent           Boolean   @default(false) @map("reminder_1d_sent")
-  reminder3dSent           Boolean   @default(false) @map("reminder_3d_sent")
-  reminder1hFailed         String?   @map("reminder_1h_failed")
-  reminder1dFailed         String?   @map("reminder_1d_failed")
-  reminder3dFailed         String?   @map("reminder_3d_failed")
+  opportunityId String    @id @map("opportunity_id")
+  data          Json
+  stage         String?
+  assigneeEmail String?   @map("assignee_email")
+
+  // --- DEPRECATED: webhook/reminder-era columns. Kept physically so the live
+  // reminder pipeline (reminder.service.js + pg_cron) keeps working until the
+  // polling system is verified. Dropped in a later coordinated cutover migration
+  // together with removal of the webhook/reminder code. Do NOT read these in new code.
+  last_activity_at         DateTime  @default(now()) @db.Timestamptz(6)
+  created_at               DateTime  @default(now()) @db.Timestamptz(6)
+  reminder_1h_sent         Boolean   @default(false)
+  reminder_1d_sent         Boolean   @default(false)
+  reminder_3d_sent         Boolean   @default(false)
+  reminder_1h_failed       String?
+  reminder_1d_failed       String?
+  reminder_3d_failed       String?
   reminder_1h_request_id   BigInt?
   reminder_1h_attempted_at DateTime? @db.Timestamptz(6)
   reminder_1h_attempts     Int       @default(0)
@@ -31,7 +41,73 @@ model Opportunity {
   reminder_3d_attempts     Int       @default(0)
   update_count             Int       @default(0)
 
+  // --- NEW: polling-based mirror + compliance engine ---
+  // Denormalized, queryable copies of Twenty fields (refreshed each poll)
+  name        String?
+  priority    String? // RATING_1..RATING_5 (priority stars) or null
+  city        String?
+  companyName String? @map("company_name")
+  assignedTo  Json?   @map("assigned_to") // array of Twenty enum names, e.g. ["DHAVAL","MANOHARI"]
+  ownerId     String? @map("owner_id") // Twenty workspace member id
+
+  // Native Twenty date fields, mirrored
+  lastContacted DateTime? @map("last_contacted") @db.Timestamptz(6)
+  nextFollowUp  DateTime? @map("next_follow_up") @db.Timestamptz(6)
+
+  // Twenty's own timestamps (opportunity delta-poll watermark + stage-change time)
+  twentyCreatedAt DateTime? @map("twenty_created_at") @db.Timestamptz(6)
+  twentyUpdatedAt DateTime? @map("twenty_updated_at") @db.Timestamptz(6)
+  deletedAt       DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  // Compliance clocks we compute ("our own updated_at")
+  lastMeaningfulUpdateAt   DateTime? @map("last_meaningful_update_at") @db.Timestamptz(6)
+  lastMeaningfulUpdateKind String?   @map("last_meaningful_update_kind") // opportunity | note | task | attachment | stage
+  lastMeaningfulUpdateBy   String?   @map("last_meaningful_update_by")
+  lastNoteAt               DateTime? @map("last_note_at") @db.Timestamptz(6)
+  lastNoteText             String?   @map("last_note_text") // truncated bodyV2.markdown of most recent note (Mail 1)
+  lastTaskAt               DateTime? @map("last_task_at") @db.Timestamptz(6)
+  stageEnteredAt           DateTime? @map("stage_entered_at") @db.Timestamptz(6) // when current stage began -> SLA color
+
+  // Bookkeeping
+  firstSeenAt  DateTime  @default(now()) @map("first_seen_at") @db.Timestamptz(6)
+  lastPolledAt DateTime? @map("last_polled_at") @db.Timestamptz(6)
+
+  // Set when the Mail 4 closure checklist has been sent for this deal, so the
+  // trigger scan never sends twice. Null = not yet sent.
+  closureSentAt DateTime? @map("closure_sent_at") @db.Timestamptz(6)
+
+  @@index([stage])
+  @@index([assigneeEmail])
+  @@index([lastMeaningfulUpdateAt])
+  @@index([twentyUpdatedAt])
   @@map("opportunities")
+}
+
+// Append-only log of stage changes detected by the poller. Drives time-in-stage
+// SLA history, proposal-share grading (A-F by TAT), and stage-wise TAT reports.
+model StageTransition {
+  id            BigInt   @id @default(autoincrement())
+  opportunityId String   @map("opportunity_id")
+  fromStage     String?  @map("from_stage")
+  toStage       String   @map("to_stage")
+  changedAt     DateTime @map("changed_at") @db.Timestamptz(6) // opp's Twenty updatedAt when the change was detected
+  detectedAt    DateTime @default(now()) @map("detected_at") @db.Timestamptz(6)
+
+  @@index([opportunityId])
+  @@index([toStage])
+  @@map("stage_transitions")
+}
+
+// One row per polled Twenty object type. Stores the high-water mark so each poll
+// only fetches records changed since the last successful run.
+model SyncCheckpoint {
+  object        String    @id // "opportunities" | "notes" | "tasks"
+  lastUpdatedAt DateTime? @map("last_updated_at") @db.Timestamptz(6) // watermark (max updatedAt seen)
+  lastRunAt     DateTime? @map("last_run_at") @db.Timestamptz(6)
+  lastRunStatus String?   @map("last_run_status") // ok | error
+  lastError     String?   @map("last_error")
+
+  @@map("sync_checkpoints")
 }
 
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
@@ -66,13 +142,25 @@ model MessageLog {
 
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model VerifiedNumber {
-  id             Int      @id @default(autoincrement())
-  phone_number   String   @unique
-  name           String
-  is_active      Boolean  @default(true)
-  created_at     DateTime @default(now())
-  twenty_user_id String?  @unique(map: "verified_number_twenty_user_id_key")
-  email          String?  @unique(map: "verified_number_email_key")
+  id                  Int            @id @default(autoincrement())
+  phone_number        String         @unique
+  name                String
+  is_active           Boolean        @default(true)
+  created_at          DateTime       @default(now())
+  twenty_user_id      String?        @unique(map: "verified_number_twenty_user_id_key")
+  email               String?        @unique(map: "verified_number_email_key")
+  empID               String?        @unique(map: "verified_number_empID_key")
+  role                String         @default("EMPLOYEE")
+  adminAccess         Boolean        @default(false)
+  callDashboardAccess Boolean        @default(false)
+  dashboardAccess     Boolean        @default(false)
+  reviewerAccess      Boolean        @default(false)
+  Employee            Employee?
+  agent_session       agent_session?
+  conversation        conversation?
+  media_context       media_context?
+  reminder            reminder[]
+  task                task[]
 }
 
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
@@ -86,38 +174,76 @@ model VideoComposition {
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 /// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
 model Warehouse {
-  warehouseOwnerType    String?
-  warehouseType         String
-  address               String
-  googleLocation        String?
-  city                  String
-  state                 String
-  postalCode            String?
-  zone                  String
-  contactPerson         String
-  contactNumber         String
-  totalSpaceSqft        Int[]
-  offeredSpaceSqft      String?
-  numberOfDocks         String?
-  clearHeightFt         String?
-  compliances           String
-  otherSpecifications   String?
-  ratePerSqft           String
-  availability          String?
-  uploadedBy            String
-  isBroker              String?
-  photos                String?
-  createdAt             DateTime?      @default(now())
-  status_updated_at     DateTime?
-  id                    Int            @id @default(autoincrement())
-  visibility            Boolean?       @default(false)
-  media                 Json?
-  alt_phone_number      String?
-  land_parcel_size      String?
-  builtup_area          String?
-  owner_warmnth         String?
-  distance_from_highway String?
-  WarehouseData         WarehouseData?
+  warehouseOwnerType          String?
+  warehouseType               String
+  address                     String
+  googleLocation              String?
+  city                        String
+  state                       String
+  postalCode                  String?
+  zone                        String
+  contactPerson               String
+  contactNumber               String
+  totalSpaceSqft              Int[]
+  offeredSpaceSqft            String?
+  numberOfDocks               String?
+  clearHeightFt               String?
+  compliances                 String
+  otherSpecifications         String?
+  ratePerSqft                 String
+  availability                String?
+  uploadedBy                  String
+  isBroker                    String?
+  photos                      String?
+  createdAt                   DateTime?            @default(now())
+  status_updated_at           DateTime?
+  id                          Int                  @id @default(autoincrement())
+  visibility                  Boolean?             @default(false)
+  media                       Json?
+  alt_phone_number            String?
+  land_parcel_size            String?
+  builtup_area                String?
+  owner_warmnth               String?
+  distance_from_highway       String?
+  is_builder                  Boolean?
+  owner_of_multiple_sites     String?
+  carpet_area                 String?
+  nearest_transport           String?
+  fire_exits                  String?
+  fire_compliance_cert_type   String?
+  negotiated_rent             String?
+  washroom_count              String?
+  ownerCompanyName            String?
+  ownerAltPoc                 String?
+  gateSizeFt                  String?
+  dockApronLengthFt           String?
+  setbackArea                 String?
+  ccRoads                     String?
+  wallAndSecurityRoom         String?
+  plinthHeightFt              String?
+  dockDimension               String?
+  canopyType                  String?
+  dockPlatformType            String?
+  otherDockingSpecs           String?
+  flooringType                String?
+  floorStrengthPerSqm         String?
+  ventilationType             String?
+  ventilationAirChangesPerDay String?
+  insulationPresent           String?
+  insulationType              String?
+  lightingDetails             String?
+  wogVerified                 Boolean?
+  centreHeight                String?
+  listing_type                String?
+  photosWebp                  String?
+  handoverDate                DateTime?            @db.Date
+  lockInDate                  DateTime?            @db.Date
+  status                      String?
+  cam                         String?
+  chargeableArea              Int?
+  scoutNotes                  String?
+  WarehouseData               WarehouseData?
+  WarehouseVisitNote          WarehouseVisitNote[]
 
   @@index([address(ops: raw("gin_trgm_ops"))], map: "idx_warehouse_address_trgm", type: Gin)
   @@index([clearHeightFt], map: "idx_warehouse_clear_height")
@@ -174,4 +300,314 @@ model customer_request {
   preferred_location      String?
   additional_requirements String?
   created_at              DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model Attachment {
+  id          String         @id
+  ticketId    String
+  name        String
+  kind        AttachmentKind
+  contentType String
+  sizeBytes   Int
+  r2Key       String         @unique
+  createdAt   DateTime       @default(now())
+  Ticket      Ticket         @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId])
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model CronRunLog {
+  id         BigInt   @id @default(autoincrement())
+  jobName    String
+  ranAt      DateTime @default(now())
+  status     String
+  durationMs Int
+  metadata   Json?
+  notes      String?
+
+  @@index([jobName, ranAt])
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model Employee {
+  empID          String         @id
+  role           String         @default("EMPLOYEE")
+  createdAt      DateTime       @default(now())
+  VerifiedNumber VerifiedNumber @relation(fields: [empID], references: [empID])
+  Ticket         Ticket[]
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model GeocodeAttempt {
+  id            Int       @id @default(autoincrement())
+  warehouseId   Int       @unique
+  attemptCount  Int       @default(0)
+  lastAttemptAt DateTime  @default(now())
+  lastVia       String?
+  lastError     String?
+  succeededAt   DateTime?
+
+  @@index([lastAttemptAt])
+  @@index([succeededAt])
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model StagedWarehouse {
+  id                          String        @id
+  reviewStatus                StagingStatus @default(PENDING)
+  source                      String
+  submittedBy                 String
+  submittedAt                 DateTime      @default(now())
+  reviewedBy                  String?
+  reviewedAt                  DateTime?
+  rejectionReason             String?
+  warehouseId                 Int?
+  rawPayload                  Json?
+  flags                       Json?
+  reviewMeta                  Json?
+  warehouseOwnerType          String?
+  warehouseType               String?
+  address                     String?
+  googleLocation              String?
+  city                        String?
+  state                       String?
+  postalCode                  String?
+  zone                        String?
+  contactPerson               String?
+  contactNumber               String?
+  totalSpaceSqft              Int[]
+  offeredSpaceSqft            String?
+  numberOfDocks               String?
+  clearHeightFt               String?
+  compliances                 String?
+  otherSpecifications         String?
+  ratePerSqft                 String?
+  availability                String?
+  uploadedBy                  String?
+  isBroker                    String?
+  photos                      String?
+  photosWebp                  String?
+  visibility                  Boolean?
+  media                       Json?
+  alt_phone_number            String?
+  land_parcel_size            String?
+  builtup_area                String?
+  owner_warmnth               String?
+  distance_from_highway       String?
+  is_builder                  Boolean?
+  owner_of_multiple_sites     String?
+  carpet_area                 String?
+  nearest_transport           String?
+  fire_exits                  String?
+  fire_compliance_cert_type   String?
+  negotiated_rent             String?
+  washroom_count              String?
+  ownerCompanyName            String?
+  ownerAltPoc                 String?
+  gateSizeFt                  String?
+  dockApronLengthFt           String?
+  setbackArea                 String?
+  ccRoads                     String?
+  wallAndSecurityRoom         String?
+  plinthHeightFt              String?
+  dockDimension               String?
+  canopyType                  String?
+  dockPlatformType            String?
+  otherDockingSpecs           String?
+  flooringType                String?
+  floorStrengthPerSqm         String?
+  ventilationType             String?
+  ventilationAirChangesPerDay String?
+  insulationPresent           String?
+  insulationType              String?
+  lightingDetails             String?
+  wogVerified                 Boolean?
+  centreHeight                String?
+  listing_type                String?
+  status                      String?
+  handoverDate                DateTime?     @db.Date
+  lockInDate                  DateTime?     @db.Date
+  cam                         String?
+  chargeableArea              Int?
+  latitude                    Float?
+  longitude                   Float?
+  fireNocAvailable            Boolean?
+  fireSafetyMeasures          String?
+  landType                    String?
+  approachRoadWidth           String?
+  dimensions                  String?
+  parkingDockingSpace         String?
+  pollutionZone               String?
+  powerKva                    String?
+  vaastuCompliance            String?
+  scoutNotes                  String?
+
+  @@index([reviewStatus, submittedAt])
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model Ticket {
+  id               String        @id
+  shortCode        String        @unique
+  title            String
+  category         String
+  amount           Decimal       @db.Decimal(12, 2)
+  description      String
+  status           TicketStatus  @default(PENDING)
+  submittedByEmpID String
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime
+  approvedAmount   Decimal?      @db.Decimal(12, 2)
+  expenseDate      DateTime?     @db.Date
+  Attachment       Attachment[]
+  Employee         Employee      @relation(fields: [submittedByEmpID], references: [empID])
+  TicketEvent      TicketEvent[]
+
+  @@index([createdAt])
+  @@index([status])
+  @@index([submittedByEmpID])
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model TicketEvent {
+  id        String   @id
+  ticketId  String
+  label     String
+  createdAt DateTime @default(now())
+  Ticket    Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId])
+}
+
+model WarehouseVisitNote {
+  id             Int       @id @default(autoincrement())
+  warehouseId    Int
+  client         String
+  clientPoc      String?
+  wareOnGoPoc    String?
+  visitDate      DateTime  @db.Date
+  clientFeedback String?
+  pocFeedback    String?
+  createdByEmail String?
+  createdByName  String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime
+  Warehouse      Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  @@index([warehouseId])
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model agent_session {
+  sender_number  String         @id
+  agent          String
+  expires_at     DateTime
+  updated_at     DateTime
+  VerifiedNumber VerifiedNumber @relation(fields: [sender_number], references: [phone_number], onDelete: Cascade)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model app_setting {
+  application String
+  key         String
+  value       Json
+  updatedBy   String?
+  updatedAt   DateTime
+
+  @@id([application, key])
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model conversation {
+  sender_number  String         @id
+  turns          Json
+  updated_at     DateTime
+  VerifiedNumber VerifiedNumber @relation(fields: [sender_number], references: [phone_number], onDelete: Cascade)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model googlemapscrapejobs {
+  id                  String    @id
+  keywords            String
+  output_key          String
+  status              String    @default("running")
+  error               String?
+  created_at          DateTime  @default(now()) @db.Timestamptz(6)
+  payload             Json?
+  queued_at           DateTime? @db.Timestamptz(6)
+  next_dispatch_after DateTime? @db.Timestamptz(6)
+  dispatched_at       DateTime? @db.Timestamptz(6)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model media_context {
+  sender_number  String         @id
+  kind           String
+  r2_url         String?
+  mime           String?
+  text           String?
+  truncated      Boolean        @default(false)
+  expires_at     DateTime
+  updated_at     DateTime
+  VerifiedNumber VerifiedNumber @relation(fields: [sender_number], references: [phone_number], onDelete: Cascade)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model micro_market {
+  id            String   @id
+  name          String   @default("")
+  city          String   @default("")
+  geometry      Json
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime @default(now()) @db.Timestamptz(6)
+  reviewerEmail String?
+  reviewerName  String?
+}
+
+model reminder {
+  id             Int            @id @default(autoincrement())
+  sender_number  String
+  from_number    String
+  text           String
+  due_at         DateTime
+  status         String         @default("pending")
+  created_at     DateTime       @default(now())
+  VerifiedNumber VerifiedNumber @relation(fields: [sender_number], references: [phone_number], onDelete: Cascade)
+
+  @@index([status, due_at])
+}
+
+model task {
+  id             Int            @id @default(autoincrement())
+  sender_number  String
+  text           String
+  done           Boolean        @default(false)
+  created_at     DateTime       @default(now())
+  done_at        DateTime?
+  VerifiedNumber VerifiedNumber @relation(fields: [sender_number], references: [phone_number], onDelete: Cascade)
+
+  @@index([sender_number, done])
+}
+
+enum AttachmentKind {
+  IMAGE
+  DOCUMENT
+}
+
+enum StagingStatus {
+  PENDING
+  IN_REVIEW
+  APPROVED
+  REJECTED
+}
+
+enum TicketStatus {
+  PENDING
+  REVIEW
+  APPROVED
+  CLEARED
+  REJECTED
+  CANCELLED
 }

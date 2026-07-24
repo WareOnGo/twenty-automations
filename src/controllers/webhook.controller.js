@@ -70,9 +70,22 @@ function parseWebhookBody(raw) {
   return JSON.parse(sanitizeJsonControls(s));
 }
 
+// REVOKED (dual-writer cutover): the polling sync (sync.service.js) is now the
+// sole writer of the opportunities mirror. Processing this webhook would (a)
+// overwrite the REST-shaped snapshot with a different webhook shape and (b) push
+// followupcount back to Twenty as an API-sourced edit — both of which corrupt
+// the poller's meaningful-update detection. Disabled by default; re-enable ONLY
+// by setting WEBHOOK_TWENTY_ENABLED=true if rolling back to the webhook model.
+const WEBHOOK_ENABLED = process.env.WEBHOOK_TWENTY_ENABLED === "true";
+
 export async function handleTwentyWebhook(req, res) {
-  // Respond immediately — never make Twenty wait
-  res.status(200).json({ received: true });
+  // Respond immediately — never make Twenty wait (also avoids retry storms).
+  res.status(200).json({ received: true, processed: WEBHOOK_ENABLED });
+
+  if (!WEBHOOK_ENABLED) {
+    console.log("[webhook] disabled (WEBHOOK_TWENTY_ENABLED!=true) — acked, not processed");
+    return;
+  }
 
   let body;
   try {
