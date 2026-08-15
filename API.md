@@ -2,7 +2,27 @@
 
 **Public base URL:** `http://ec2-13-206-110-74.ap-south-1.compute.amazonaws.com` (subject to change on instance restart — see DEPLOYMENT.md)
 
-All endpoints accept JSON unless noted otherwise.
+All endpoints accept and return JSON.
+
+Six endpoints, in two groups:
+
+| Endpoint | Auth | Caller |
+|---|---|---|
+| `GET /health` | none | deploy health check, uptime probes |
+| `POST /rfq` | none *(gap — see README)* | whatsapp-logistics-bot, `frontend/` |
+| `POST /sync` | `X-Auth` | pg_cron (`crm-sync-delta`, `crm-sync-full`) |
+| `POST /morning-briefing` | `X-Auth` | pg_cron (`crm-morning-briefing`) |
+| `POST /admin-briefing` | `X-Auth` | pg_cron (`crm-admin-briefing`) |
+| `POST /closure-checklist` | `X-Auth` | manual / trigger |
+
+## Authentication
+
+The four scheduled endpoints require an `X-Auth` header matching `REMINDER_SECRET` in the service env.
+
+| Response | Meaning |
+|---|---|
+| `401 {"error":"Unauthorized"}` | header missing or wrong |
+| `503 {"error":"Server not configured"}` | `REMINDER_SECRET` unset on the server — all requests refused |
 
 ---
 
@@ -13,14 +33,14 @@ Liveness probe.
 **Response** `200 OK`
 
 ```json
-{ "status": "ok", "timestamp": "2026-04-26T10:30:00.000Z" }
+{ "status": "ok", "timestamp": "2026-08-15T10:30:00.000Z" }
 ```
 
 ---
 
 ## `POST /rfq`
 
-Parses a natural-language RFQ message into a structured opportunity and creates it in Twenty CRM. The opportunity is attributed to the WhatsApp sender (when known) and inferred assignees are set when the message explicitly asks for them.
+Parses a natural-language RFQ message into a structured opportunity and creates it in Twenty CRM. The opportunity is attributed to the WhatsApp sender when known, and assignees are set when the message explicitly asks for them.
 
 **Request body**
 
@@ -45,10 +65,10 @@ Parses a natural-language RFQ message into a structured opportunity and creates 
   "parsed": {
     "name": "TBD - 5,000 sqft - TBD, Bangalore",
     "stage": "RFQ_RECEIVED",
-    "leadSource": "DIRECT",
+    "leadSource": "WHATSAPP_INBOUND",
     "duration": "LONG_TERM",
     "city": "Bangalore",
-    "repeatCustomer": false,
+    "repeatClient": ["NO"],
     "description": "Need 5000 sqft warehouse in Bangalore. assign to jayanth",
     "assignedTo": ["JAYANTH"],
     "createdBy": {
@@ -70,23 +90,25 @@ Parses a natural-language RFQ message into a structured opportunity and creates 
 | Field | Type | Description |
 |---|---|---|
 | `name` | string | `Company - Space - Area, City`. `TBD` for unknown parts. |
-| `stage` | enum | Defaults to `RFQ_RECEIVED`. Other values inferred only if explicitly stated. |
-| `leadSource` | enum | `GODAMWALE`, `BROKER`, or `DIRECT`. |
+| `stage` | enum | Defaults to `RFQ_RECEIVED`. Set only when the message explicitly states one. |
+| `leadSource` | enum | `GODAMWALE`, `BROKER`, or `WHATSAPP_INBOUND`. |
 | `duration` | enum | `LONG_TERM` (default) or `SHORT_TERM` (only if explicitly < 1 year). |
 | `city` | string | Omitted if not mentioned. |
-| `repeatCustomer` | boolean | `true` only if explicitly stated. |
+| `repeatClient` | string[] | Twenty multi-select: `["OPTION1"]` for a repeat client, `["NO"]` otherwise. |
 | `companyName` | string | Omitted if not mentioned. |
 | `budget` | string | Per-sqft rate as a number string. Omitted if not mentioned. |
 | `description` | string | Raw RFQ text verbatim. |
-| `amount` | object | `{ amountMicros, currencyCode }`. Omitted unless total deal size is explicitly mentioned. |
+| `amount` | object | `{ amountMicros, currencyCode }`. Omitted unless total deal size is explicitly mentioned. Converted to micros before the Twenty call. |
 | `pocName` | object | `{ firstName, lastName }`. Omitted if not mentioned. |
 | `pocPhoneNumber` | object | `{ primaryPhoneNumber, primaryPhoneCallingCode, primaryPhoneCountryCode }`. Omitted if not mentioned. |
-| `assignedTo` | string[] | Inferred only when the message explicitly asks ("assign to X", "X please handle"). Each value is a Twenty enum (uppercased first name). Validated against `ASSIGNABLE_USERS`; unknown names are dropped. Field omitted entirely if no explicit assignment intent. |
+| `assignedTo` | string[] | Set only when the message explicitly asks ("assign to X", "X please handle"). Each value is a Twenty enum (uppercased first name), validated against `ASSIGNABLE_USERS`; unknown names are dropped silently. Field omitted entirely if there's no explicit assignment intent. |
 | `createdBy` | object | Set only when `senderNumber` resolved against `VerifiedNumber`. Otherwise Twenty defaults to the API key. |
 
 ### Stage enum
 
-`NEW_LEAD`, `RFQ_RECEIVED` *(default)*, `RFQ_NOT_RELEVANT`, `PROPOSAL_SHARED`, `FOLLOW_UP`, `SITE_VISIT`, `NEGOTIATION`, `DEAL_LOST`, `AGREEMENT_WORK`, `MONEY_COLLECTION`, `DEAL_CLOSED`.
+The parser emits: `NEW_LEAD`, `RFQ_RECEIVED` *(default)*, `RFQ_NOT_RELEVANT`, `PROPOSAL_SHARED`, `FOLLOW_UP`.
+
+Twenty's full set, which the mirror and briefings handle: the five above plus `SITE_VISIT`, `NEGOTIATION`, `AGREEMENT_WORK`, `MONEY_COLLECTION`, `DEAL_LOST`, `DEAL_CLOSED`, `DEAL_ON_HOLD`.
 
 ### `assignedTo` enum
 
@@ -94,108 +116,126 @@ Sourced from the `ASSIGNABLE_USERS` env var. Currently: `DHAVAL`, `JAYANTH`, `NI
 
 ---
 
-## `POST /webhook/twenty`
+## `POST /sync`
 
-Receives opportunity create/update events from Twenty CRM. Upserts the row into the local `opportunities` table, resets reminder timers on activity, then asynchronously resolves the deal creator from Twenty REST and prepends their email to `assignee_email`.
+Runs one poll cycle against Twenty: mirrors opportunities, notes and tasks into Postgres, advances the meaningful-update clocks, and logs stage transitions. Called by pg_cron every 10 minutes (delta) and nightly (full).
 
-**Request headers**
-
-Twenty currently posts JSON bodies with `Content-Type: application/x-www-form-urlencoded` (an upstream quirk). The handler recovers the JSON regardless. Plain `application/json` also works.
+Overlapping runs are prevented twice over — an in-process flag, and a DB-row mutex with a 20-minute TTL that also holds across app instances.
 
 **Request body**
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `id` | string | Yes | Twenty opportunity UUID |
-| `stage` | string | No | e.g. `RFQ_RECEIVED` |
-| `assigned_to` | string | No | Comma-separated names (e.g. `"DHAVAL,RAGHAV"`); each becomes `<name>@wareongo.com` |
-| `deal_name` | string | No | |
-| `company` | string | No | |
-| `description` | string | No | |
-| `POC Name` | string | No | |
-| `POC Phone Number` | string | No | |
-| `created_at` | string | No | |
-| `last_updated` | string | No | |
-
-**Response** `200 OK` (returned immediately; upsert + creator resolution happen async)
-
-```json
-{ "received": true }
-```
-
-### Recipient ordering
-
-After the upsert, the handler GETs `/rest/opportunities/{id}` from Twenty, reads `createdBy.workspaceMemberId`, and looks the user up via `VerifiedNumber.twenty_user_id`. If found, the creator's email is **prepended** to `assignee_email` (deduped, case-insensitive). At reminder send time `email.service.js` uses the first entry as `To:` and the rest as `Cc:` — so the creator becomes the primary recipient.
-
-If creator resolution fails for any reason, the upsert is unaffected and the existing assignees still get the reminder.
-
----
-
-## `POST /send-reminder`
-
-Called by Supabase `pg_cron`. Sends one follow-up email per call, with retry/backoff on Resend errors. The Postgres cron job flips `reminder_<step>_sent` to `true` based on the response.
-
-**Request headers**
-
-| Header | Value |
-|---|---|
-| `Content-Type` | `application/json` |
-| `X-Auth` | Shared secret. Validated against `REMINDER_SECRET` in the service env. Requests without it return `401`; the service refuses all requests with `503` if the secret isn't configured. |
-
-**Request body**
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `opportunityId` | string | Yes | The opportunity to remind about |
-| `assigneeEmail` | string | Yes | Recipient string. May be a single email or comma-separated; the first entry becomes `To:`, the rest `Cc:`. Already includes the creator (prepended at webhook time). |
-| `step` | string enum | Yes | `1h`, `1d`, or `3d` |
-
-**Example request**
-
-```json
-{
-  "opportunityId": "cc53ed26-3928-48f4-82ea-af406a122d07",
-  "assigneeEmail": "raghav@wareongo.com,dhaval@wareongo.com",
-  "step": "1h"
-}
-```
-
-**Responses**
-
-```json
-{ "sent": true }
-```
-```json
-{ "sent": false, "skipped": true }
-```
-
-On failure (Resend error after retries, opportunity not found, etc.) the endpoint returns a `4xx` or `5xx` with an `error` body — the cron reconciler infers failure from the HTTP status code, not from a payload field. Example:
-
-```json
-{ "error": "Internal server error" }
-```
-
----
-
-## `POST /email`
-
-Ad-hoc reminder-style email send. Same recipient semantics as `/send-reminder` (comma list → first is `To:`, rest are `Cc:`).
-
-**Request body**
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `to` | string | Yes | Recipient email or comma-separated list. |
-| `text` | string | Yes | Plain-text body. |
-| `timePeriod` | string | Yes | One of `"1 hour"`, `"1 day"`, `"3 days"` — used to build the subject (`[<period>] RFQ Reminder`). |
+| `full` | boolean | No | `true` ignores the stored watermarks, re-reads every record, and soft-deletes mirror rows that have vanished from Twenty. Defaults to `false` (delta since last watermark, minus a 2-minute overlap). Also accepted as `?full=true`. |
 
 **Response** `200 OK`
 
 ```json
-{ "message": "Email sent", "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890" }
+{
+  "status": "ok",
+  "full": false,
+  "streams": {
+    "opportunities": { "count": 3, "watermark": "2026-08-15T04:55:08.000Z", "failures": 0, "softDeleted": 0 },
+    "notes":         { "count": 1, "watermark": "2026-08-15T04:51:22.000Z", "failures": 0 },
+    "tasks":         { "count": 0, "watermark": null, "failures": 0 }
+  },
+  "durationMs": 1840
+}
 ```
 
-> The underlying `sendMail` service supports richer fields (`subject`, `html`), but they are not accepted at the HTTP layer — `/send-reminder` is the path that uses them.
+A stream that fails is reported inline as `{"error": "..."}` without aborting the others; its checkpoint records the error and its watermark is not advanced.
+
+**Response** `202 Accepted` — a run is already in flight, this call was skipped.
+
+```json
+{ "status": "already_running" }
+```
+
+If the DB-level mutex is held instead, you get `200` with `{"skipped": true, "reason": "locked"}`.
+
+---
+
+## `POST /morning-briefing`
+
+Mail 1. Builds and sends one personalised briefing per sales recipient — their own active deals, stages 1–5 as SLA-coloured cards, later stages as a table. Recipients with zero active deals are skipped, not mailed.
+
+One recipient failing (build or send) is logged and does not abort the run.
+
+**Request body**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `dryRunEmail` | string | No | Redirects **all** briefings to this one inbox. Use before any change to the mail. |
+
+**Response** `200 OK`
+
+```json
+{ "status": "ok", "sent": 6, "skipped": 3, "recipients": 9 }
+```
+
+`202 {"status":"already_running"}` if a run is in flight.
+
+---
+
+## `POST /admin-briefing`
+
+Mail 2. One digest to all admin recipients (`VerifiedNumber.adminAccess`, falling back to Jayanth + Dhaval if none are flagged). Part 1 is per-person CRM adoption — what share of each person's active deals saw a meaningful update yesterday (IST), worst first, RED at ≤50% and GREEN at ≥80%. Part 2 is RED SLA breaches across the team, plus deals flagged for admin.
+
+**Request body**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `dryRunEmail` | string | No | Sends to this inbox instead of the admins. |
+
+**Response** `200 OK`
+
+```json
+{
+  "status": "ok",
+  "recipients": 2,
+  "breaches": 11,
+  "flagged": 0,
+  "rows": [{ "email": "x@wareongo.com", "name": "X", "total": 12, "updated": 4, "pct": 33, "color": "RED" }],
+  "totalActive": 84,
+  "updatedYesterday": 29
+}
+```
+
+> `flagged` is currently always `0` — it depends on a "Flag for Admin" field that doesn't exist in Twenty yet.
+
+---
+
+## `POST /closure-checklist`
+
+Mail 4. Sends a deal-closure checklist with countdown deadlines (internal negotiation 24h, client↔owner meeting 3d, move to Agreement Work 5d), measured from when the deal entered `SITE_VISIT`. Goes to the deal's assignees.
+
+Two modes:
+
+**Request body**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `opportunityId` | string | one of | Send the checklist for this deal. |
+| `scan` | boolean | one of | `true` finds every site-visit-success deal without a checklist already sent, and sends each. |
+| `dryRunEmail` | string | No | Redirects mail to one inbox. On a dry run `closureSentAt` is **not** stamped, so a preview never suppresses the real send. |
+
+A successful real send stamps `Opportunity.closureSentAt`, so `scan` never sends twice for the same deal.
+
+**Response** `200 OK` — single deal:
+
+```json
+{ "status": "ok", "sent": true, "to": "raghav@wareongo.com" }
+```
+
+`{ "sent": false, "reason": "no recipient" }` when the deal has no assignee email.
+
+**Response** `200 OK` — scan:
+
+```json
+{ "status": "ok", "scanned": 2, "results": [{ "id": "cc53ed26-…", "sent": true, "to": "…" }] }
+```
+
+> `scan` currently returns `0` — it depends on a site-visit-outcome field that doesn't exist in Twenty yet. Sending by `opportunityId` works today.
 
 ---
 
@@ -207,15 +247,17 @@ Ad-hoc reminder-style email send. Same recipient semantics as `/send-reminder` (
 { "error": "Missing 'rfq' field in request body" }
 ```
 
-`401` — `/send-reminder` without a valid `X-Auth`.
+`401` / `503` — see Authentication above.
 
-`5xx` — internal error (logged on the server).
+`404` — `/closure-checklist` for an `opportunityId` not present in the mirror.
+
+`5xx` — internal error (details logged server-side, not returned).
 
 ```json
 { "error": "Internal server error" }
 ```
 
-CRM upstream error (the controller forwards Twenty's status as a `4xx`):
+Twenty upstream errors are forwarded with Twenty's status code. The controller logs Twenty's full rejection body; the client only gets:
 
 ```json
 { "error": "Twenty CRM API error: 400" }

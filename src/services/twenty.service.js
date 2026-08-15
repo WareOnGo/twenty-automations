@@ -47,51 +47,6 @@ export async function createOpportunityFromData(data) {
   return body;
 }
 
-export async function updateOpportunity(id, patch) {
-  const baseUrl = process.env.TWENTY_CRM_BASE_URL;
-  const apiKey = process.env.TWENTY_CRM_API_KEY;
-
-  const response = await fetch(`${baseUrl}/rest/opportunities/${id}`, {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(patch),
-  });
-
-  const body = await response.json();
-
-  if (!response.ok) {
-    const error = new Error(`Twenty CRM API error: ${response.status}`);
-    error.status = response.status;
-    error.body = body;
-    throw error;
-  }
-
-  return body;
-}
-
-export async function getOpportunity(id) {
-  const baseUrl = process.env.TWENTY_CRM_BASE_URL;
-  const apiKey = process.env.TWENTY_CRM_API_KEY;
-
-  const response = await fetch(`${baseUrl}/rest/opportunities/${id}`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-  });
-
-  const body = await response.json();
-
-  if (!response.ok) {
-    const error = new Error(`Twenty CRM API error: ${response.status}`);
-    error.status = response.status;
-    error.body = body;
-    throw error;
-  }
-
-  return body?.data?.opportunity ?? null;
-}
-
 /**
  * List all records of a Twenty object changed since a timestamp, following
  * cursor pagination to completion. Used by the polling sync (sync.service.js).

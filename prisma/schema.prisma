@@ -18,30 +18,12 @@ model Opportunity {
   stage         String?
   assigneeEmail String?   @map("assignee_email")
 
-  // --- DEPRECATED: webhook/reminder-era columns. Kept physically so the live
-  // reminder pipeline (reminder.service.js + pg_cron) keeps working until the
-  // polling system is verified. Dropped in a later coordinated cutover migration
-  // together with removal of the webhook/reminder code. Do NOT read these in new code.
-  last_activity_at         DateTime  @default(now()) @db.Timestamptz(6)
-  created_at               DateTime  @default(now()) @db.Timestamptz(6)
-  reminder_1h_sent         Boolean   @default(false)
-  reminder_1d_sent         Boolean   @default(false)
-  reminder_3d_sent         Boolean   @default(false)
-  reminder_1h_failed       String?
-  reminder_1d_failed       String?
-  reminder_3d_failed       String?
-  reminder_1h_request_id   BigInt?
-  reminder_1h_attempted_at DateTime? @db.Timestamptz(6)
-  reminder_1h_attempts     Int       @default(0)
-  reminder_1d_request_id   BigInt?
-  reminder_1d_attempted_at DateTime? @db.Timestamptz(6)
-  reminder_1d_attempts     Int       @default(0)
-  reminder_3d_request_id   BigInt?
-  reminder_3d_attempted_at DateTime? @db.Timestamptz(6)
-  reminder_3d_attempts     Int       @default(0)
-  update_count             Int       @default(0)
+  // NOTE: the webhook/reminder-era columns (last_activity_at, created_at,
+  // reminder_*, update_count) still exist physically in Postgres but are no
+  // longer modelled here — that code is gone. They all carry DB defaults, so
+  // inserts through Prisma are unaffected. Run sql/drop_legacy_reminder_columns.sql
+  // to drop them for good.
 
-  // --- NEW: polling-based mirror + compliance engine ---
   // Denormalized, queryable copies of Twenty fields (refreshed each poll)
   name        String?
   priority    String? // RATING_1..RATING_5 (priority stars) or null

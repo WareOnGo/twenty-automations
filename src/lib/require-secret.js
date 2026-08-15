@@ -1,7 +1,9 @@
-// Shared X-Auth shared-secret guard for pg_cron-triggered endpoints. pg_cron
-// sends the secret in the X-Auth header (see sql/*.sql). Defaults to
-// REMINDER_SECRET so no new prod config is required; pass a different env var
-// name to use a dedicated secret.
+// Shared X-Auth shared-secret guard for the pg_cron-triggered endpoints
+// (/sync, /morning-briefing, /admin-briefing, /closure-checklist). pg_cron sends
+// the secret in the X-Auth header — see sql/pg_cron_*.sql. The env var is still
+// named REMINDER_SECRET for historical reasons (renaming it means touching the
+// prod .env and every SQL job at once); pass a different name for a dedicated
+// secret.
 export function requireSecret(envVar = "REMINDER_SECRET") {
   return (req, res, next) => {
     const expected = process.env[envVar];

@@ -2,7 +2,7 @@ import { Resend } from "resend";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-export async function sendMail({ to, subject, text, html, timePeriod }) {
+export async function sendMail({ to, subject, text, html }) {
   // `to` may be a single email, a comma-separated string ("a@x.com,b@x.com"),
   // or an array. Normalize to an array for Resend.
   const recipients = Array.isArray(to)
@@ -21,14 +21,11 @@ export async function sendMail({ to, subject, text, html, timePeriod }) {
   // First assignee on To:, rest on Cc:.
   const [primary, ...cc] = recipients;
 
-  // Back-compat: older callers pass { timePeriod } instead of { subject }.
-  const finalSubject = subject || `[${timePeriod}] RFQ Reminder`;
-
   const { data, error } = await resend.emails.send({
     from: process.env.RESEND_FROM || "onboarding@resend.dev",
     to: primary,
     ...(cc.length ? { cc } : {}),
-    subject: finalSubject,
+    subject,
     text,
     ...(html ? { html } : {}),
   });
