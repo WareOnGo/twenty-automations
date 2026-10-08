@@ -72,7 +72,7 @@ function fixture(streams={}) {
 }
 
 test('keeps full snapshots and refreshes relations with unchanged parent updatedAt',async()=>{
-  const f=fixture({opportunities:[opportunity('o',{position:1,searchVector:'raw-index',secondaryAssignee:[],timelineActivities:[{id:'event'}],owner:{name:'New owner'}})]});
+  const f=fixture({opportunities:[opportunity('o',{position:1,searchVector:'raw-index',secondaryAssignee:'SECONDARY_TEAMMATE',timelineActivities:[{id:'event'}],owner:{name:'New owner'}})]});
   f.state.opportunities.set('o',{opportunityId:'o',stage:'NEW_LEAD',data:opportunity('o',{owner:{name:'Old owner'}}),lastMeaningfulUpdateAt:before});
   const result=await f.runSync();
   assert.equal(result.status,'ok');
@@ -194,4 +194,16 @@ test('failed stage snapshot rolls back its transition, and retry logs the move o
   await f.runSync();
   assert.equal(f.state.transitions.length,1);
   assert.equal(f.state.opportunities.get('o').stage,'PROPOSAL_SHARED');
+});
+
+
+test('secondary assignee changes are retained even without an opportunity timestamp bump',async()=>{
+  const f=fixture({opportunities:[opportunity('o',{secondaryAssignee:'TEAMMATE_A'})]});
+  await f.runSync();
+  const entered=f.state.opportunities.get('o').stageEnteredAt;
+  f.streams.opportunities[0]={...f.streams.opportunities[0],secondaryAssignee:'TEAMMATE_B'};
+  await f.runSync();
+  assert.equal(f.state.opportunities.get('o').data.secondaryAssignee,'TEAMMATE_B');
+  assert.equal(f.state.opportunities.get('o').stageEnteredAt.getTime(),entered.getTime());
+  assert.equal(f.state.transitions.length,0);
 });

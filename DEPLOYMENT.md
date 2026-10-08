@@ -61,8 +61,9 @@ The workflow is defined in `.github/workflows/deploy.yml`.
 3. SSHes into the instance as `ec2-user` and runs:
    - `git fetch --all --prune`
    - `git reset --hard origin/main`
-   - `npm ci --omit=dev`
-   - `npx prisma generate`
+   - Locked dependency install (including the pinned Prisma CLI), with automatic client generation disabled and bounded memory/time
+   - Explicit `prisma generate` with the installed CLI; no implicit dependency installs
+   - `npm test` and the idempotent, CRM-only `npm run sync:migrate`
    - `pm2 reload crm-automations --update-env` (or `pm2 start` if first run)
    - `pm2 save`
 4. Hits `http://<EC2_HOST>/health` up to 5 times; fails the workflow if we never get a 200
@@ -302,3 +303,16 @@ GitHub Actions ── SSH ──▶ EC2 (git pull + pm2 reload)
 - CI/CD workflow: `.github/workflows/deploy.yml`
 - pm2 config (on server only): `/home/ec2-user/app/ecosystem.config.cjs`
 - Caddy config (on server only): `/etc/caddy/Caddyfile`
+
+
+## Prisma postinstall recovery
+
+The October 8 deployment fetched its commit successfully, then stalled inside
+`@prisma/client` postinstall. After instance recovery, startup failed because the
+client was uninitialized. The workflow now skips implicit generation with
+`PRISMA_SKIP_POSTINSTALL_GENERATE=1`, installs the lockfile's CLI explicitly, and
+runs generation separately with `PRISMA_GENERATE_SKIP_AUTOINSTALL=1`. npm and
+Prisma commands have a 256 MB Node heap limit and 180/90-second timeouts; the
+application's runtime heap settings are unchanged. SSH keepalives retain progress
+through quiet installation phases. Do not infer an OOM kill solely from a broken
+SSH pipe; inspect npm and kernel logs first.

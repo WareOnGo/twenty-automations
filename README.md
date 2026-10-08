@@ -88,6 +88,8 @@ This intentionally uses more Twenty reads than the previous delta-only approach.
 
 - `opportunities.data` retains **every field returned by REST**, including position,
   searchVector, timelineActivities, favorites and new custom fields when returned.
+  `secondaryAssignee` is retained as supplied (including blank/null values); it
+  does not change primary-assignee briefing ownership or the stage activity clock.
 - `crm_records` stores complete note/task JSONB, native timestamps, deletion state and
   `opportunity_ids` for joins. Notes linked only to a company/person are retained too.
   `last_note_text` remains a 2,000-character display excerpt; raw note bodies are uncut.

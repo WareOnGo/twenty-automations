@@ -79,7 +79,7 @@ jobs:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
         run: |
-          ssh -i ~/.ssh/deploy_key "$EC2_USER@$EC2_HOST" bash <<'REMOTE'
+          ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=12 -i ~/.ssh/deploy_key "$EC2_USER@$EC2_HOST" bash <<'REMOTE'
             set -euo pipefail
 
             # Load nvm so node/npm/pm2 are on PATH
@@ -93,11 +93,22 @@ jobs:
             git reset --hard origin/main
             git log -1 --oneline
 
-            echo "==> Install prod deps"
-            npm ci --omit=dev
+            # The 1 GB host previously stalled in @prisma/client postinstall.
+            # Install the locked CLI too, skip implicit generation, then generate
+            # once with bounded memory/time and no automatic package installation.
+            echo "==> Install locked dependencies"
+            NODE_OPTIONS="--max-old-space-size=256" PRISMA_SKIP_POSTINSTALL_GENERATE=1 \
+              timeout 180s npm ci --include=dev --no-audit --no-fund --foreground-scripts
 
             echo "==> Prisma generate"
-            npx prisma generate
+            NODE_OPTIONS="--max-old-space-size=256" PRISMA_GENERATE_SKIP_AUTOINSTALL=1 \
+              timeout 90s npx --no-install prisma generate
+
+            echo "==> Sync regression tests"
+            npm test
+
+            echo "==> Additive CRM migration"
+            npm run sync:migrate
 
             echo "==> Reload pm2"
             if pm2 describe crm-automations >/dev/null 2>&1; then
