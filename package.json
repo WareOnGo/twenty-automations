@@ -9,7 +9,9 @@
     "dev": "node --watch src/server.js",
     "prisma:generate": "npx prisma generate",
     "prisma:migrate": "npx prisma migrate dev",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test",
+    "sync:backfill": "node scripts/backfill-crm.js",
+    "sync:migrate": "node scripts/migrate-crm-records.js"
   },
   "keywords": [],
   "author": "",

@@ -16,10 +16,11 @@ WhatsApp → Twilio → whatsapp-logistics-bot ──── POST /rfq ───�
                                                                   Twenty CRM
                                                                       │
                                         ┌─────────────────────────────┘
-                                        │ polled every 10 min (delta)
+                                        │ snapshots refreshed every 10 min
                                         │ + nightly full reconcile
                                         ▼
                                 POST /sync ──▶ opportunities mirror
+                                               crm_records (raw notes/tasks)
                                                stage_transitions
                                                sync_checkpoints
                                                (Supabase Postgres)
@@ -46,7 +47,8 @@ src/
   services/
     rfq.service.js               OpenAI RFQ parsing + assignee inference
     twenty.service.js            Twenty REST: create opportunity, paginated list-since
-    sync.service.js              The poller — mirror + meaningful-update clock (see below)
+    sync.service.js              Production Prisma/Twenty wiring
+    sync-engine.js               Snapshot mirror + meaningful-update clock (see below)
     morning-briefing.service.js  Mail 1 — per-salesperson SLA briefing
     admin-briefing.service.js    Mail 2 — team hygiene + escalations
     closure-checklist.service.js Mail 4 — site-visit-success checklist
@@ -60,7 +62,9 @@ src/
 prisma/
   schema.prisma        Introspected from the SHARED Supabase DB — most models belong to
                        other WareOnGo systems. Ours: Opportunity, StageTransition,
-                       SyncCheckpoint (+ VerifiedNumber, shared).
+                       SyncCheckpoint, CrmRecord (+ VerifiedNumber, shared).
+migrations/            Versioned, additive CRM-only SQL migrations
+test/                  Sync retry/storage/pagination regressions (npm test)
 sql/                   (gitignored) Local copy of the SQL run against Supabase
 frontend/              Static HTML/JS form for manual RFQ submission
 ```
@@ -73,7 +77,51 @@ The core of `sync.service.js`, and the reason it exists: **Twenty's `updatedAt` 
 - Our own API writebacks *do* bump it. Twenty tags every change with `updatedBy.source` = `MANUAL` | `API`; only `MANUAL` counts.
 - Only an allowlist of ~25 business fields counts as a change (`QUALIFYING_OPP_FIELDS`). Reassignment is deliberately excluded — it isn't sales activity on the deal.
 
-The result is `last_meaningful_update_at`, which everything downstream grades against. Supporting machinery: per-stream watermarks in `sync_checkpoints` with a 2-minute overlap window, an append-only `stage_transitions` log for time-in-stage TAT, a cross-instance mutex (a `sync_checkpoints` row with a 20-min TTL — session-scoped advisory locks don't survive pgBouncer), and a soft-delete safety valve that refuses to remove more than 20% of the mirror in one run.
+The result is `last_meaningful_update_at`, which everything downstream grades against. Supporting machinery: per-stream successful watermarks in `sync_checkpoints`, an append-only `stage_transitions` log for time-in-stage TAT, a cross-instance mutex (a `sync_checkpoints` row with a 20-min TTL — session-scoped advisory locks don't survive pgBouncer), and a soft-delete safety valve that refuses to remove more than max(50 records, 20% of the mirror) in one run.
+
+## Raw CRM mirror and recovery
+
+Each ten-minute run reads complete, paginated `depth=1` snapshots of opportunities,
+notes and tasks. Related objects and new custom fields can change without a parent
+`updatedAt` bump, so watermarks are health/progress metadata rather than fetch filters.
+This intentionally uses more Twenty reads than the previous delta-only approach.
+
+- `opportunities.data` retains **every field returned by REST**, including position,
+  searchVector, timelineActivities, favorites and new custom fields when returned.
+- `crm_records` stores complete note/task JSONB, native timestamps, deletion state and
+  `opportunity_ids` for joins. Notes linked only to a company/person are retained too.
+  `last_note_text` remains a 2,000-character display excerpt; raw note bodies are uncut.
+- Every failed write prevents that stream's watermark advancing. Partial runs return
+  HTTP 503, with per-stream counts; malformed pages, repeated cursors/IDs, timeouts and
+  page caps fail closed. Other streams can still make progress.
+- `full=true` additionally reconciles deletions after a successful complete fetch.
+  Existing raw snapshots are retained with `deleted_at` set; empty/truncated-looking
+  results trip the deletion guard. Missing parents are retried on every cycle.
+
+This is a current REST mirror, not a historical backup of the entire Twenty workspace:
+standalone people/companies and attachment bytes are not separate streams, and records
+already deleted before ingestion cannot be reconstructed. Stage history records moves
+observed by the poller, not a complete pre-sync audit trail.
+
+Before deploying this change to the worker, run the additive migration against the
+configured Supabase connection (do **not** run `prisma db push` on this shared database):
+
+```bash
+npm test
+npm run sync:migrate
+```
+
+After the worker is deployed, backfill all current snapshots with:
+
+```bash
+npm run sync:backfill
+```
+
+Both scripts use the existing `.env`; they print counts/status only and do not send
+briefings or change records in Twenty. The backfill shares the scheduled worker's
+mutex and exits unsuccessfully if another run owns it. Run it again after that run
+finishes. The migration is additive/idempotent and keeps the raw table private with
+RLS and no public/API-role grants. Analyst access belongs on separately masked views.
 
 ## Scheduled jobs
 

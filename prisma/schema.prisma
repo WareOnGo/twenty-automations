@@ -80,8 +80,28 @@ model StageTransition {
   @@map("stage_transitions")
 }
 
+// Full depth=1 REST note/task snapshots, including records without an opportunity.
+// The additive SQL migration also enables RLS and revokes public/API-role access.
+model CrmRecord {
+  object          String
+  recordId        String    @map("record_id")
+  data            Json
+  opportunityIds  String[]  @map("opportunity_ids")
+  twentyCreatedAt DateTime? @map("twenty_created_at") @db.Timestamptz(6)
+  twentyUpdatedAt DateTime? @map("twenty_updated_at") @db.Timestamptz(6)
+  deletedAt       DateTime? @map("deleted_at") @db.Timestamptz(6)
+  firstSeenAt     DateTime  @default(now()) @map("first_seen_at") @db.Timestamptz(6)
+  lastPolledAt    DateTime  @default(now()) @map("last_polled_at") @db.Timestamptz(6)
+
+  @@id([object, recordId])
+  @@index([object, twentyUpdatedAt])
+  @@index([opportunityIds], type: Gin)
+  @@map("crm_records")
+}
+
 // One row per polled Twenty object type. Stores the high-water mark so each poll
-// only fetches records changed since the last successful run.
+// records the newest completely persisted source update. Full snapshots are
+// refreshed every cycle because relation edits do not change parent updatedAt.
 model SyncCheckpoint {
   object        String    @id // "opportunities" | "notes" | "tasks"
   lastUpdatedAt DateTime? @map("last_updated_at") @db.Timestamptz(6) // watermark (max updatedAt seen)

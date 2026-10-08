@@ -15,7 +15,8 @@ export async function triggerSync(req, res) {
   running = true;
   try {
     const summary = await runSync({ full });
-    res.status(200).json({ status: "ok", ...summary });
+    res.status(summary.skipped ? 202 : summary.status === "partial" ? 503 : 200)
+      .json({ status: summary.skipped ? "already_running" : "ok", ...summary });
   } catch (err) {
     console.error("[sync] run failed:", err.message);
     res.status(500).json({ status: "error", error: "Internal server error" });
