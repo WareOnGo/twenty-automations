@@ -86,6 +86,21 @@ notes and tasks. Related objects and new custom fields can change without a pare
 `updatedAt` bump, so watermarks are health/progress metadata rather than fetch filters.
 This intentionally uses more Twenty reads than the previous delta-only approach.
 
+The worker fetches and saves one 60-record page at a time, loading only that page's
+old opportunity snapshots for comparison. Pages and streams run sequentially.
+Across pages it retains IDs/cursors for validation and deletion checks, plus compact
+activity clocks and note excerpts; raw snapshots are never accumulated for a whole
+stream. Checkpoints advance only after the entire stream succeeds. A later fetch or
+write failure leaves earlier writes retryable and prevents deletion reconciliation.
+
+The checked-in PM2 configuration caps Node's old-generation heap at 192 MiB while
+retaining the 400 MiB process memory restart threshold. Each completed run logs
+`memory.rssMiB`, `heapUsedMiB` and `maxSampledRssMiB` (samples at page boundaries).
+The heap limit leaves headroom for Prisma, network buffers and other native memory;
+it is not a total process memory cap. Run `npm run sync:benchmark` for a synthetic
+eight-cycle check with 2,000 opportunities, 400 notes and 100 tasks. This does not
+call Twenty or a database; verify production RSS and checkpoint progress after deploy.
+
 - `opportunities.data` retains **every field returned by REST**, including position,
   searchVector, timelineActivities, favorites and new custom fields when returned.
   `secondaryAssignee` is retained as supplied (including blank/null values); it

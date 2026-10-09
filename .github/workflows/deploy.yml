@@ -111,11 +111,7 @@ jobs:
             npm run sync:migrate
 
             echo "==> Reload pm2"
-            if pm2 describe crm-automations >/dev/null 2>&1; then
-              pm2 reload crm-automations --update-env
-            else
-              pm2 start ecosystem.config.cjs
-            fi
+            pm2 startOrReload ecosystem.config.cjs --only crm-automations --update-env
             pm2 save
           REMOTE
 

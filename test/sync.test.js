@@ -12,7 +12,7 @@ const deferred = operation => ({then:(resolve,reject)=>Promise.resolve().then(op
 function fixture(streams={}) {
   const state = {
     checkpoints:new Map(['opportunities','notes','tasks'].map(object => [object,{object,lastUpdatedAt:before}])),
-    opportunities:new Map(), raw:new Map(), transitions:[], calls:[],
+    opportunities:new Map(), raw:new Map(), transitions:[], calls:[], reads:[], deletions:[],
     failOpps:new Set(), failRaw:new Set(), failActivity:false, stale:0, deleted:0,
   };
   const db = {
@@ -34,7 +34,10 @@ function fixture(streams={}) {
       },
     },
     opportunity:{
-      findMany:async({where})=>[...state.opportunities.values()].filter(r=>where.opportunityId.in.includes(r.opportunityId)),
+      findMany:async({where,select})=>{
+        state.reads.push({where,select});
+        return [...state.opportunities.values()].filter(r=>where.opportunityId.in.includes(r.opportunityId));
+      },
       upsert:({where,update,create})=>deferred(()=>{
         if(state.failOpps.has(where.opportunityId)) throw new Error('injected write failure');
         const row=state.opportunities.get(where.opportunityId);
@@ -45,7 +48,7 @@ function fixture(streams={}) {
         Object.assign(state.opportunities.get(where.opportunityId),data);
       },
       count:async({where})=>where.opportunityId?state.stale:state.opportunities.size,
-      updateMany:async()=>{state.deleted+=state.stale; return {count:state.stale};},
+      updateMany:async(args)=>{state.deletions.push(args); state.deleted+=state.stale; return {count:state.stale};},
     },
     stageTransition:{create:({data})=>deferred(()=>state.transitions.push(data))},
     $transaction:async(operations)=>{
@@ -63,10 +66,12 @@ function fixture(streams={}) {
     },
     $queryRaw:async()=>[{active:0,stale:0}],
   };
-  const engine=createSyncEngine({prisma:db,logger:{log(){},warn(){},error(){}},listRecordsSince:async(object,opts)=>{
+  const engine=createSyncEngine({prisma:db,logger:{log(){},warn(){},error(){}},listRecordPages:async function*(object,opts){
     state.calls.push({object,...opts});
     if(streams[object] instanceof Error) throw streams[object];
-    return streams[object]??[];
+    if(typeof streams[object]==='function') { yield* streams[object](state); return; }
+    const records=streams[object]??[];
+    for(let i=0;i<records.length;i+=opts.pageLimit) yield records.slice(i,i+opts.pageLimit);
   }});
   return {...engine,state,streams};
 }
@@ -206,4 +211,76 @@ test('secondary assignee changes are retained even without an opportunity timest
   assert.equal(f.state.opportunities.get('o').data.secondaryAssignee,'TEAMMATE_B');
   assert.equal(f.state.opportunities.get('o').stageEnteredAt.getTime(),entered.getTime());
   assert.equal(f.state.transitions.length,0);
+});
+
+test('saves each opportunity page before fetching the next and reads at most 60 old snapshots',async()=>{
+  const records=Array.from({length:125},(_,i)=>opportunity(`o${i}`));
+  const f=fixture({opportunities:async function*(state){
+    yield records.slice(0,60);
+    assert.equal(state.opportunities.size,60);
+    assert.equal(state.checkpoints.get('opportunities').lastUpdatedAt,before);
+    yield records.slice(60,120);
+    assert.equal(state.opportunities.size,120);
+    yield records.slice(120);
+  }});
+  const result=await f.runSync();
+  assert.equal(result.status,'ok');
+  assert.equal(result.streams.opportunities.count,125);
+  assert.equal(f.state.opportunities.size,125);
+  assert.deepEqual(f.state.reads.map(r=>r.where.opportunityId.in.length),[60,60,5]);
+});
+
+test('a failed later opportunity page retains the checkpoint and cannot reconcile deletions',async()=>{
+  const f=fixture({opportunities:async function*(){
+    yield [opportunity('first',{stage:'PROPOSAL_SHARED'})];
+    throw new Error('second page failed');
+  }});
+  f.state.opportunities.set('first',{opportunityId:'first',data:opportunity('first'),stage:'NEW_LEAD'});
+  f.state.stale=1;
+  assert.equal((await f.runSync({full:true})).status,'partial');
+  assert.equal(f.state.opportunities.get('first').stage,'PROPOSAL_SHARED');
+  assert.equal(f.state.checkpoints.get('opportunities').lastUpdatedAt,before);
+  assert.equal(f.state.checkpoints.get('opportunities').lastRunStatus,'error');
+  assert.equal(f.state.deleted,0);
+  assert.equal(f.state.checkpoints.get('__sync_lock__').lastRunStatus,'idle');
+  f.streams.opportunities=[opportunity('first',{stage:'PROPOSAL_SHARED'})];
+  f.state.stale=0;
+  assert.equal((await f.runSync()).status,'ok');
+  assert.equal(f.state.transitions.length,1);
+});
+
+test('full reconciliation retains IDs from every successfully saved page',async()=>{
+  const records=Array.from({length:125},(_,i)=>opportunity(`o${i}`));
+  const f=fixture({opportunities:records}); f.state.stale=1;
+  assert.equal((await f.runSync({full:true})).status,'ok');
+  assert.deepEqual(f.state.deletions[0].where.opportunityId.notIn,records.map(r=>r.id));
+});
+
+test('a failed later note page preserves saved raw notes but cannot publish success',async()=>{
+  const f=fixture({notes:async function*(state){
+    yield [note('first')];
+    assert.ok(state.raw.has('notes:first'));
+    throw new Error('second page failed');
+  }});
+  const result=await f.runSync({full:true});
+  assert.equal(result.status,'partial');
+  assert.equal(f.state.checkpoints.get('notes').lastUpdatedAt,before);
+  assert.equal(f.state.checkpoints.get('notes').lastRunStatus,'error');
+  assert.equal(f.state.deleted,0);
+});
+
+test('activity clocks and note text aggregate across pages, with bounded parent lookups',async()=>{
+  const records=Array.from({length:125},(_,i)=>opportunity(`o${i}`));
+  const notes=records.map((r,i)=>note(`n${i}`,{bodyV2:{markdown:`note ${i}`},noteTargets:[{targetOpportunityId:r.id}]}));
+  // The newest note has no text: an older nonempty note still supplies the excerpt.
+  notes.push(note('newer',{updatedAt:'2026-10-08T02:00:00Z',updatedBy:{source:'MANUAL',name:'Teammate'},noteTargets:[{targetOpportunityId:'o0'}]}));
+  const f=fixture({opportunities:records,notes});
+  const result=await f.runSync();
+  assert.equal(result.status,'ok');
+  assert.equal(result.streams.notes.count,126);
+  assert.equal(f.state.opportunities.get('o0').lastNoteText,'note 0');
+  assert.equal(f.state.opportunities.get('o0').lastNoteAt.toISOString(),'2026-10-08T02:00:00.000Z');
+  assert.equal(f.state.opportunities.get('o0').lastMeaningfulUpdateKind,'note');
+  assert.equal(f.state.opportunities.get('o124').lastNoteText,'note 124');
+  assert.ok(f.state.reads.every(r=>r.where.opportunityId.in.length<=60));
 });

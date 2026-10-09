@@ -51,6 +51,7 @@ const QUALIFYING_OPP_FIELDS = [
 // Refresh every snapshot on every cycle. Related objects and newly added fields
 // can change without the parent updatedAt changing; timestamp-only deltas lose them.
 const NOTE_TEXT_MAX = 2000;
+const SYNC_PAGE_SIZE = 60;
 // Full-reconcile soft-delete safety valve: never soft-delete more than this
 // fraction of the active mirror in one run (guards against a truncated Twenty
 // response wiping live deals). Also never delete when nothing came back.
@@ -134,6 +135,15 @@ function noteText(record) {
   return null;
 }
 
+function* batches(items, size) {
+  let batch = [];
+  for (const item of items) {
+    batch.push(item);
+    if (batch.length === size) { yield batch; batch = []; }
+  }
+  if (batch.length) yield batch;
+}
+
 // Load VerifiedNumber once per run into two lowercased lookups:
 //   byId        : twenty workspace member id -> roster email
 //   byFirstName : UPPERCASE first name       -> roster email
@@ -141,7 +151,7 @@ function noteText(record) {
 // briefing/hygiene queries match case-sensitively). Resolving assignees through
 // the roster (not synthesised slugs) keeps ONE identity per person, so owner,
 // creator, and assignee collapse to the same email and never double-count.
-export function createSyncEngine({ prisma, listRecordsSince, logger = console }) {
+export function createSyncEngine({ prisma, listRecordPages, logger = console }) {
   async function loadMemberMaps() {
     const rows = await prisma.verifiedNumber.findMany({
       where: { email: { not: null } },
@@ -182,28 +192,19 @@ export function createSyncEngine({ prisma, listRecordsSince, logger = console })
   // ---------------------------------------------------------------------------
   // Opportunity stream
   // ---------------------------------------------------------------------------
-  async function syncOpportunities({ memberMaps, full }) {
-    const records = await listRecordsSince("opportunities", { sinceISO: null, depth: 1 });
+  async function syncOpportunityPage(records, memberMaps) {
     let watermark = null;
-    const liveIds = full ? new Set() : null;
-
-    // Bulk-load existing mirror rows for this batch in one query (avoids an N+1
-    // findUnique per record).
+    let failures = 0;
     const existingById = new Map();
     if (records.length) {
       const rows = await prisma.opportunity.findMany({
-        where: { opportunityId: { in: records.map((r) => r.id) } },
+        where: { opportunityId: { in: records.map(r => r.id) } },
+        select: { opportunityId: true, data: true, stage: true,
+          stageEnteredAt: true, lastMeaningfulUpdateAt: true },
       });
       for (const row of rows) existingById.set(row.opportunityId, row);
     }
-
-    let failures = 0;
     for (const rec of records) {
-      // Record exists in Twenty even if we fail to process it — add to liveIds
-      // BEFORE the try so a processing error can't cause it to be soft-deleted
-      // during a full reconcile.
-      if (liveIds) liveIds.add(rec.id);
-
       try {
       const existing = existingById.get(rec.id) ?? null;
       const prevData = existing?.data;
@@ -298,6 +299,24 @@ export function createSyncEngine({ prisma, listRecordsSince, logger = console })
         logger.error(`[sync] opportunity write failed (${err.code ?? err.name})`);
       }
     }
+    return { watermark, failures };
+  }
+
+  async function syncOpportunities({ memberMaps, full, observeMemory }) {
+    let watermark = null;
+    let count = 0;
+    let failures = 0;
+    const liveIds = full ? new Set() : null;
+    for await (const records of listRecordPages("opportunities", { sinceISO: null, depth: 1, pageLimit: SYNC_PAGE_SIZE })) {
+      observeMemory();
+      count += records.length;
+      // Save IDs even for failed writes, but never reconcile an incomplete run.
+      if (liveIds) for (const record of records) liveIds.add(record.id);
+      const page = await syncOpportunityPage(records, memberMaps);
+      watermark = maxDate(watermark, page.watermark);
+      failures += page.failures;
+      observeMemory();
+    }
 
     // Full reconcile also catches records that vanished from Twenty (hard-deleted
     // or filtered out) — soft-delete them locally. Guard against a truncated
@@ -326,7 +345,7 @@ export function createSyncEngine({ prisma, listRecordsSince, logger = console })
       }
     }
 
-    return { count: records.length, watermark, failures, softDeleted, reconciliationSkipped };
+    return { count, watermark, failures, softDeleted, reconciliationSkipped };
   }
 
   // ---------------------------------------------------------------------------
@@ -334,66 +353,89 @@ export function createSyncEngine({ prisma, listRecordsSince, logger = console })
   // `field` is the clock column ("Note" | "Task"); we set lastNoteAt/lastTaskAt
   // for display (any source) and advance lastMeaningfulUpdateAt only for MANUAL.
   // ---------------------------------------------------------------------------
-  async function syncLinkedObjects(object, { kind, full }) {
-    const records = await listRecordsSince(object, { sinceISO: null, depth: 1 });
+  async function syncLinkedObjects(object, { kind, full, observeMemory }) {
+    const liveIds = full ? [] : null;
+    let count = 0;
     const targetsKey = object === "notes" ? "noteTargets" : "taskTargets";
 
-    // Aggregate per opportunity so each deal is written once.
+    // Retain only bounded text excerpts and clocks per opportunity, never raw pages.
     const perOpp = new Map(); // oppId -> { lastAt, text, meaningfulAt, by }
     let watermark = null;
     let failures = 0;
     let unresolvedLinks = 0;
 
-    for (const rec of records) {
-      // Keep every raw note/task, including records linked only to people/companies.
-      // Persist first: a clock update alone is not a successful mirror write.
-      try {
-        await persistCrmRecord(object, rec, targetsKey);
-      } catch (err) {
-        failures++;
-        logger.error(`[sync] ${object} snapshot write failed (${err.code ?? err.name})`);
-        continue;
-      }
-      if (rec.deletedAt) continue;
-      watermark = maxDate(watermark, rec.updatedAt);
-      const at = toDate(rec.updatedAt);
-      const manual = isManual(rec);
-      const text = object === "notes" ? noteText(rec) : null;
+    for await (const records of listRecordPages(object, { sinceISO: null, depth: 1, pageLimit: SYNC_PAGE_SIZE })) {
+      observeMemory();
+      count += records.length;
+      if (liveIds) for (const record of records) liveIds.push(record.id);
+      for (const rec of records) {
+        // Keep every raw note/task, including records linked only to people/companies.
+        // Persist first: a clock update alone is not a successful mirror write.
+        try {
+          await persistCrmRecord(object, rec, targetsKey);
+        } catch (err) {
+          failures++;
+          logger.error(`[sync] ${object} snapshot write failed (${err.code ?? err.name})`);
+          continue;
+        }
+        if (rec.deletedAt) continue;
+        watermark = maxDate(watermark, rec.updatedAt);
+        const at = toDate(rec.updatedAt);
+        const manual = isManual(rec);
+        const text = object === "notes" ? noteText(rec) : null;
 
-      for (const t of rec[targetsKey] ?? []) {
-        const oppId = t.targetOpportunityId;
-        if (!oppId || t.deletedAt) continue;
-        const cur = perOpp.get(oppId) ?? { lastAt: null, text: null, textAt: null, meaningfulAt: null, by: null };
-        // display clock: newest linked record wins (any source)
-        if (!cur.lastAt || (at && at > cur.lastAt)) {
-          cur.lastAt = at;
+        for (const t of rec[targetsKey] ?? []) {
+          const oppId = t.targetOpportunityId;
+          if (!oppId || t.deletedAt) continue;
+          const cur = perOpp.get(oppId) ?? { lastAt: null, text: null, textAt: null, meaningfulAt: null, by: null };
+          // display clock: newest linked record wins (any source)
+          if (!cur.lastAt || (at && at > cur.lastAt)) {
+            cur.lastAt = at;
+          }
+          // note text: keep the newest note that actually HAS text, so a newer
+          // empty-body note never blanks an older real note.
+          if (text && (!cur.textAt || (at && at > cur.textAt))) {
+            cur.text = text;
+            cur.textAt = at;
+          }
+          // meaningful clock: newest MANUAL record
+          if (manual && (!cur.meaningfulAt || (at && at > cur.meaningfulAt))) {
+            cur.meaningfulAt = at;
+            cur.by = rec.updatedBy?.name ?? null;
+          }
+          perOpp.set(oppId, cur);
         }
-        // note text: keep the newest note that actually HAS text, so a newer
-        // empty-body note never blanks an older real note.
-        if (text && (!cur.textAt || (at && at > cur.textAt))) {
-          cur.text = text;
-          cur.textAt = at;
-        }
-        // meaningful clock: newest MANUAL record
-        if (manual && (!cur.meaningfulAt || (at && at > cur.meaningfulAt))) {
-          cur.meaningfulAt = at;
-          cur.by = rec.updatedBy?.name ?? null;
-        }
-        perOpp.set(oppId, cur);
       }
+      observeMemory();
     }
 
-    // Bulk-load the target opportunities in one query.
+    // Apply compact activity aggregates in bounded database batches too.
+    for (const entries of batches(perOpp, SYNC_PAGE_SIZE)) {
+      const result = await applyActivityPage(object, kind, entries);
+      failures += result.failures;
+      unresolvedLinks += result.unresolvedLinks;
+      observeMemory();
+    }
+    const reconciliation = full && failures === 0
+      ? await reconcileCrmRecords(object, liveIds)
+      : { softDeleted: 0, reconciliationSkipped: full && failures > 0 };
+    return { count, watermark, failures, unresolvedLinks, ...reconciliation };
+  }
+
+  async function applyActivityPage(object, kind, entries) {
+    let failures = 0;
+    let unresolvedLinks = 0;
+    // Only load clock fields for this batch of target opportunities.
     const existingById = new Map();
-    if (perOpp.size) {
+    if (entries.length) {
       const rows = await prisma.opportunity.findMany({
-        where: { opportunityId: { in: [...perOpp.keys()] } },
+        where: { opportunityId: { in: entries.map(([id]) => id) } },
         select: { opportunityId: true, lastMeaningfulUpdateAt: true, lastNoteAt: true, lastTaskAt: true },
       });
       for (const row of rows) existingById.set(row.opportunityId, row);
     }
 
-    for (const [oppId, agg] of perOpp) {
+    for (const [oppId, agg] of entries) {
       const existing = existingById.get(oppId);
       // Retain the raw record even if its parent is deleted/missing. Every cycle
       // reprocesses links, so a parent arriving later receives its activity clocks.
@@ -428,10 +470,7 @@ export function createSyncEngine({ prisma, listRecordsSince, logger = console })
       }
     }
 
-    const reconciliation = full && failures === 0
-      ? await reconcileCrmRecords(object, records.map(r => r.id))
-      : { softDeleted: 0, reconciliationSkipped: full && failures > 0 };
-    return { count: records.length, watermark, failures, unresolvedLinks, ...reconciliation };
+    return { failures, unresolvedLinks };
   }
 
   async function persistCrmRecord(object, record, targetsKey) {
@@ -515,6 +554,13 @@ export function createSyncEngine({ prisma, listRecordsSince, logger = console })
    */
   async function runSync({ full = false } = {}) {
     const startedAt = Date.now();
+    let maxSampledRss = 0;
+    const observeMemory = () => {
+      const usage = process.memoryUsage();
+      maxSampledRss = Math.max(maxSampledRss, usage.rss);
+      return usage;
+    };
+    observeMemory();
     if (!(await acquireSyncLock())) {
       logger.warn("[sync] another run holds the lock — skipping this cycle");
       return { skipped: true, reason: "locked" };
@@ -526,7 +572,7 @@ export function createSyncEngine({ prisma, listRecordsSince, logger = console })
 
     // Opportunities first so notes/tasks can link to freshly-created rows.
     try {
-      const r = await syncOpportunities({ memberMaps, full });
+      const r = await syncOpportunities({ memberMaps, full, observeMemory });
       await saveCheckpoint("opportunities", { watermark: r.watermark, status: streamStatus(r),
         error: streamStatus(r) === "error" ? "Incomplete stream; checkpoint retained for retry" : null });
       summary.streams.opportunities = r;
@@ -539,7 +585,7 @@ export function createSyncEngine({ prisma, listRecordsSince, logger = console })
     for (const object of ["notes", "tasks"]) {
       try {
         const r = await syncLinkedObjects(object, {
-          full,
+          full, observeMemory,
           kind: object === "notes" ? "note" : "task",
         });
         await saveCheckpoint(object, { watermark: r.watermark, status: streamStatus(r),
@@ -554,7 +600,11 @@ export function createSyncEngine({ prisma, listRecordsSince, logger = console })
 
     summary.status = Object.values(summary.streams).some(r => r.error || streamStatus(r) === "error") ? "partial" : "ok";
     summary.durationMs = Date.now() - startedAt;
-    logger.log(`[sync] done full=${full} ${JSON.stringify(summary.streams)} in ${summary.durationMs}ms`);
+    const memory = observeMemory();
+    const mib = bytes => Math.round(bytes / 1048576);
+    summary.memory = { rssMiB: mib(memory.rss), heapUsedMiB: mib(memory.heapUsed),
+      maxSampledRssMiB: mib(maxSampledRss) };
+    logger.log(`[sync] done full=${full} ${JSON.stringify(summary.streams)} in ${summary.durationMs}ms memory=${JSON.stringify(summary.memory)}`);
     return summary;
     } finally {
       await releaseSyncLock();

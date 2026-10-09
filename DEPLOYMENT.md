@@ -30,7 +30,7 @@ AWS Console links (ap-south-1):
 |---|---|
 | `/home/ec2-user/app` | The deployed git checkout (origin: this repo, branch: `main`) |
 | `/home/ec2-user/app/.env` | Real environment variables — **not in git** |
-| `/home/ec2-user/app/ecosystem.config.cjs` | pm2 process config |
+| `/home/ec2-user/app/ecosystem.config.cjs` | Versioned pm2 process config and memory budget |
 | `/home/ec2-user/.pm2/logs/crm-automations-*.log` | App stdout + stderr |
 | `/etc/caddy/Caddyfile` | Reverse proxy config (`:80` → `127.0.0.1:3000`) |
 | `/etc/systemd/system/caddy.service` | Caddy systemd unit |
@@ -64,7 +64,7 @@ The workflow is defined in `.github/workflows/deploy.yml`.
    - Locked dependency install (including the pinned Prisma CLI), with automatic client generation disabled and bounded memory/time
    - Explicit `prisma generate` with the installed CLI; no implicit dependency installs
    - `npm test` and the idempotent, CRM-only `npm run sync:migrate`
-   - `pm2 reload crm-automations --update-env` (or `pm2 start` if first run)
+   - `pm2 startOrReload ecosystem.config.cjs --only crm-automations --update-env` (applies the versioned heap budget too)
    - `pm2 save`
 4. Hits `http://<EC2_HOST>/health` up to 5 times; fails the workflow if we never get a 200
 
@@ -301,7 +301,7 @@ GitHub Actions ── SSH ──▶ EC2 (git pull + pm2 reload)
 ## File references
 
 - CI/CD workflow: `.github/workflows/deploy.yml`
-- pm2 config (on server only): `/home/ec2-user/app/ecosystem.config.cjs`
+- pm2 config: `ecosystem.config.cjs` (deployed to `/home/ec2-user/app/ecosystem.config.cjs`)
 - Caddy config (on server only): `/etc/caddy/Caddyfile`
 
 
@@ -312,7 +312,36 @@ The October 8 deployment fetched its commit successfully, then stalled inside
 client was uninitialized. The workflow now skips implicit generation with
 `PRISMA_SKIP_POSTINSTALL_GENERATE=1`, installs the lockfile's CLI explicitly, and
 runs generation separately with `PRISMA_GENERATE_SKIP_AUTOINSTALL=1`. npm and
-Prisma commands have a 256 MB Node heap limit and 180/90-second timeouts; the
-application's runtime heap settings are unchanged. SSH keepalives retain progress
+Prisma commands have a 256 MB Node heap limit and 180/90-second timeouts. The
+application runtime uses the separate 192 MiB budget in `ecosystem.config.cjs`.
+SSH keepalives retain progress
 through quiet installation phases. Do not infer an OOM kill solely from a broken
 SSH pipe; inspect npm and kernel logs first.
+
+## CRM sync memory budget
+
+The October 9 fix processes source and mirror snapshots in sequential pages of 60
+records. The previous implementation accumulated every source page, then loaded all
+old mirror rows simultaneously. On the production host Node's default heap limit
+was about 470 MiB while PM2 restarted the whole process above 400 MiB RSS. Logs
+confirmed repeated PM2 memory restarts during syncs, leaving the 20-minute lock
+behind and causing subsequent polls to skip.
+
+`ecosystem.config.cjs` now sets `--max-old-space-size=192`. Deploy through the config
+file, rather than reloading by process name alone, so PM2 picks up the new Node
+arguments. Keep credentials in the existing `.env`; no database migration is needed
+for this batching change. The existing lock expiry and freshness cutoff are unchanged.
+
+Before applying the versioned config on an existing host, back up its local
+`ecosystem.config.cjs` and preserve any additional environment or process settings.
+After deployment, inspect `pm2 jlist` for the Node argument and watch at least three
+consecutive scheduled syncs: every stream should finish `ok`, checkpoints should
+advance every ten minutes, memory should stay comfortably below 400 MiB, and the
+restart count should remain stable. The synthetic benchmark excludes Prisma's
+native memory and is not proof of production memory use.
+
+For a local stress check with five times the current source volume:
+
+```bash
+npm run sync:benchmark -- --records=10000 --cycles=8
+```

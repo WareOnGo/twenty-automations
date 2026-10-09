@@ -5,12 +5,13 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js",
+    "start": "node --max-old-space-size=192 src/server.js",
     "dev": "node --watch src/server.js",
     "prisma:generate": "npx prisma generate",
     "prisma:migrate": "npx prisma migrate dev",
     "test": "node --test",
-    "sync:backfill": "node scripts/backfill-crm.js",
+    "sync:backfill": "node --max-old-space-size=192 scripts/backfill-crm.js",
+    "sync:benchmark": "node --max-old-space-size=192 scripts/benchmark-sync-memory.js",
     "sync:migrate": "node scripts/migrate-crm-records.js"
   },
   "keywords": [],

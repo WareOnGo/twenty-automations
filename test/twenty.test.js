@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { listRecordsSince } from '../src/services/twenty.service.js';
+import { listRecordsSince, listRecordPages } from '../src/services/twenty.service.js';
 
 process.env.TWENTY_CRM_BASE_URL='https://twenty.invalid';
 process.env.TWENTY_CRM_API_KEY='test-only';
@@ -44,4 +44,28 @@ test('timeout includes stalled JSON body reads',async()=>{
 
 test('HTTP failures never expose provider response bodies',async()=>{
   await assert.rejects(listRecordsSince('notes',{fetchImpl:async()=>({ok:false,status:502,json:async()=>({secret:'no'})})}),/HTTP 502/);
+});
+
+test('page iteration fetches only when the consumer asks for the next page',async()=>{
+  let calls=0;
+  const pages=[page([record('a')],true,'cursor1'),page([record('b')])];
+  const fetchImpl=async()=>{calls++; return {ok:true,json:async()=>pages.shift()};};
+  const iterator=listRecordPages('notes',{fetchImpl});
+  assert.equal(calls,0);
+  assert.deepEqual((await iterator.next()).value,[record('a')]);
+  assert.equal(calls,1);
+  assert.deepEqual((await iterator.next()).value,[record('b')]);
+  assert.equal(calls,2);
+  assert.equal((await iterator.next()).done,true);
+});
+
+test('iterator rejects a later duplicate after an earlier valid page',async()=>{
+  const iterator=listRecordPages('notes',{fetchImpl:transport([page([record('a')],true,'cursor'),page([record('a')])])});
+  assert.deepEqual((await iterator.next()).value,[record('a')]);
+  await assert.rejects(iterator.next(),/duplicate record/);
+});
+
+test('iterator rejects a provider page that exceeds the requested batch size',async()=>{
+  const iterator=listRecordPages('notes',{fetchImpl:transport([page([record('a'),record('b')])]),pageLimit:1});
+  await assert.rejects(iterator.next(),/oversized page/);
 });
