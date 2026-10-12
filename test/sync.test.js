@@ -9,14 +9,14 @@ const note = (id, extra={}) => ({id, createdAt:at, updatedAt:at, noteTargets:[],
 
 const deferred = operation => ({then:(resolve,reject)=>Promise.resolve().then(operation).then(resolve,reject)});
 
-function fixture(streams={}) {
+function fixture(streams={}, members=[]) {
   const state = {
     checkpoints:new Map(['opportunities','notes','tasks'].map(object => [object,{object,lastUpdatedAt:before}])),
     opportunities:new Map(), raw:new Map(), transitions:[], calls:[], reads:[], deletions:[],
     failOpps:new Set(), failRaw:new Set(), failActivity:false, stale:0, deleted:0,
   };
   const db = {
-    verifiedNumber:{findMany:async()=>[]},
+    verifiedNumber:{findMany:async()=>members},
     syncCheckpoint:{
       findUnique:async({where})=>state.checkpoints.get(where.object),
       upsert:async({where,create,update})=>{
@@ -283,4 +283,89 @@ test('activity clocks and note text aggregate across pages, with bounded parent 
   assert.equal(f.state.opportunities.get('o0').lastMeaningfulUpdateKind,'note');
   assert.equal(f.state.opportunities.get('o124').lastNoteText,'note 124');
   assert.ok(f.state.reads.every(r=>r.where.opportunityId.in.length<=60));
+});
+
+
+test('website intake stays unassigned while explicit ownership and other intake keep working', async () => {
+  const members = [
+    { twenty_user_id: 'creator', name: 'Creator', email: 'creator@example.com' },
+    { twenty_user_id: 'owner', name: 'Owner', email: 'owner@example.com' },
+    { twenty_user_id: 'ranita', name: 'Ranita', email: 'ranita@example.com' },
+  ];
+  const intake = { leadSource: 'WEBSITE_SEO', assignedTo: [], ownerId: null,
+    description: 'Website reference: website:enquiry:42\nSource: homepage',
+    createdBy: { source: 'API', workspaceMemberId: 'creator' } };
+  const f = fixture({ opportunities: [
+    opportunity('seo', intake),
+    opportunity('ads', { ...intake, leadSource: 'WEBSITE_GOOGLE_ADS' }),
+    opportunity('request', { ...intake, description: 'Website reference: website:customer_request:9007199254740993\nSource: warehouse-request' }),
+    opportunity('assigned', { ...intake, assignedTo: ['RANITA'] }),
+    opportunity('owned', { ...intake, ownerId: 'owner' }),
+    opportunity('whatsapp', { ...intake, leadSource: 'WHATSAPP_INBOUND' }),
+    opportunity('manual', { ...intake, createdBy: { source: 'MANUAL', workspaceMemberId: 'creator' } }),
+  ] }, members);
+  assert.equal((await f.runSync()).status, 'ok');
+  const email = id => f.state.opportunities.get(id).assigneeEmail;
+  assert.equal(email('seo'), null);
+  assert.equal(email('ads'), null);
+  assert.equal(email('request'), null);
+  assert.equal(email('assigned'), 'ranita@example.com');
+  assert.equal(email('owned'), 'owner@example.com');
+  assert.equal(email('whatsapp'), 'creator@example.com');
+  assert.equal(email('manual'), 'creator@example.com');
+  f.streams.opportunities[0] = opportunity('seo', { ...intake, assignedTo: ['RANITA'] });
+  await f.runSync();
+  assert.equal(email('seo'), 'ranita@example.com');
+  f.streams.opportunities[0] = opportunity('seo', intake);
+  await f.runSync();
+  assert.equal(email('seo'), null, 'removing an explicit assignee keeps this integration unassigned');
+});
+
+test('existing website API integrations retain their creator fallback without this integration reference', async () => {
+  const members = [{ twenty_user_id: 'creator', name: 'Creator', email: 'creator@example.com' }];
+  const descriptions = [undefined, null, '', 42, {}, 'Existing website import',
+    'Details\nWebsite reference: website:enquiry:42',
+    'Website reference: another-system:enquiry:42',
+    'Website reference: website:other:42',
+    'Website reference: website:enquiry:unknown',
+    'Website reference: website:enquiry:42-extra',
+    'Website reference: website:enquiry:42 unrelated text'];
+  const records = ['WEBSITE_SEO', 'WEBSITE_GOOGLE_ADS'].flatMap(leadSource =>
+    descriptions.map((description, index) => opportunity(`${leadSource}-${index}`, {
+      leadSource, description, assignedTo: [], ownerId: null,
+      createdBy: { source: 'API', workspaceMemberId: 'creator' },
+    })));
+  const f = fixture({ opportunities: records }, members);
+  assert.equal((await f.runSync()).status, 'ok');
+  for (const record of records) {
+    const mirrored = f.state.opportunities.get(record.id);
+    assert.equal(mirrored.assigneeEmail, 'creator@example.com', record.id);
+    assert.deepEqual(mirrored.data, record, 'the original CRM record is preserved');
+  }
+});
+
+test('other integrations keep the original assignee, owner, then creator precedence', async () => {
+  const members = [
+    { twenty_user_id: 'creator', name: 'Creator', email: 'creator@example.com' },
+    { twenty_user_id: 'owner', name: 'Owner', email: 'owner@example.com' },
+    { twenty_user_id: 'ranita', name: 'Ranita', email: 'ranita@example.com' },
+  ];
+  const leadSources = ['WHATSAPP_INBOUND', 'OUTREACH', 'EXISTING_CLIENT', 'CLIENT_OWNER_REFERRAL',
+    'GODAMWALE', 'GW_REACTIVATION', 'BROKER', 'TOLET_BOARDS', 'WEBSITE_SEO', 'WEBSITE_GOOGLE_ADS'];
+  const cases = [
+    { assignedTo: ['RANITA'], ownerId: 'owner', expected: 'ranita@example.com' },
+    { assignedTo: [], ownerId: 'owner', expected: 'owner@example.com' },
+    { assignedTo: [], ownerId: null, expected: 'creator@example.com' },
+    { assignedTo: null, expected: 'creator@example.com' },
+  ];
+  const records = leadSources.flatMap(leadSource => cases.map(({ expected, ...ownership }, index) =>
+    opportunity(`${leadSource}-${index}`, { leadSource, ...ownership,
+      createdBy: { source: 'API', workspaceMemberId: 'creator' } })));
+  const f = fixture({ opportunities: records }, members);
+  assert.equal((await f.runSync()).status, 'ok');
+  for (const leadSource of leadSources) {
+    for (const [index, { expected }] of cases.entries()) {
+      assert.equal(f.state.opportunities.get(`${leadSource}-${index}`).assigneeEmail, expected);
+    }
+  }
 });

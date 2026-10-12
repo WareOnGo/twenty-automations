@@ -112,11 +112,16 @@ function deriveAssigneeEmail(record, { byId, byFirstName }) {
     push(byFirstName.get(key) || (slug ? `${slug}@wareongo.com` : null));
   }
 
-  // Fallback only when nobody is assigned: attribute to the owner/creator.
-  // `ownerId` is often null on the record while createdBy is populated, so try
-  // both (they resolve to the same person).
+  // Only leads carrying this website backend's reference skip the creator
+  // fallback. Existing integrations retain their behavior, including other
+  // API-created website leads. Explicit owners and assignees always take effect.
   if (emails.length === 0) {
-    push(byId.get(record?.ownerId) || byId.get(record?.createdBy?.workspaceMemberId));
+    const websiteIntake = record?.createdBy?.source === "API" &&
+      ["WEBSITE_SEO", "WEBSITE_GOOGLE_ADS"].includes(record?.leadSource) &&
+      typeof record?.description === "string" &&
+      /^Website reference: website:(?:enquiry|customer_request):\d+(?:\r?\n|$)/.test(record.description);
+    push(byId.get(record?.ownerId) ||
+      (websiteIntake ? null : byId.get(record?.createdBy?.workspaceMemberId)));
   }
 
   const seen = new Set();
