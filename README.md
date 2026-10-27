@@ -1,9 +1,10 @@
 # CRM Automations
 
-Backend service for WareOnGo. Two jobs, one Express app:
+Backend service for WareOnGo. Three jobs, one Express app:
 
 1. **RFQ intake** — parses natural-language RFQ messages from WhatsApp into structured opportunities (via OpenAI) and creates them in Twenty CRM.
 2. **Sales compliance engine** — polls Twenty into a local Postgres mirror, computes per-deal SLA clocks, and emails SLA-graded briefings on a schedule.
+3. **Assignment reminder beta** — sends internal WhatsApp reminders through Ramesh for new, whitelisted CRM assignments. Assignment/2h/4h reminders, 8h management escalation, and owner notifications for unassigned leads. Dhaval and Jayanth receive reminders but their own assignment sequences never escalate. Sending defaults off. See [beta behavior and rollout](docs/crm-reminder-beta.md) and [future integrations](docs/crm-reminders-future-integrations.md).
 
 There is no in-process scheduler. Supabase **`pg_cron` + `pg_net`** POST to HTTP endpoints on this service; Postgres is the clock, the app is the worker. Every scheduled endpoint is guarded by an `X-Auth` shared secret.
 

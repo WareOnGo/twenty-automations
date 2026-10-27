@@ -12,7 +12,9 @@
     "test": "node --test",
     "sync:backfill": "node --max-old-space-size=192 scripts/backfill-crm.js",
     "sync:benchmark": "node --max-old-space-size=192 scripts/benchmark-sync-memory.js",
-    "sync:migrate": "node scripts/migrate-crm-records.js"
+    "sync:migrate": "node scripts/migrate-crm-records.js",
+    "reminders:migrate": "node scripts/migrate-lead-reminders.js",
+    "reminders:dry-run": "node scripts/dry-run-lead-reminders.js"
   },
   "keywords": [],
   "author": "",
@@ -26,6 +28,8 @@
     "resend": "^6.10.0"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.11",
+    "@electric-sql/pglite-socket": "0.2.14",
     "prisma": "^6.19.3"
   }
 }

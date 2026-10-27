@@ -112,6 +112,45 @@ model SyncCheckpoint {
   @@map("sync_checkpoints")
 }
 
+// CRM reminder beta: private tables installed by reminders:migrate, never db push.
+// Runtime uses fenced SQL so deployment does not depend on regenerating the client.
+model CrmReminderRollout {
+  id           String    @id
+  newLeadsFrom DateTime  @map("new_leads_from") @db.Timestamptz(6)
+  leaseToken   String?   @map("lease_token") @db.Uuid
+  leaseUntil   DateTime? @map("lease_until") @db.Timestamptz(6)
+
+  @@map("crm_reminder_rollout")
+}
+
+model CrmLeadReminderState {
+  opportunityId   String                  @id @map("opportunity_id")
+  sourceCreatedAt DateTime                @map("source_created_at") @db.Timestamptz(6)
+  state           Json
+  updatedAt       DateTime                @default(now()) @map("updated_at") @db.Timestamptz(6)
+  outbox          CrmLeadReminderOutbox[]
+
+  @@map("crm_lead_reminder_state")
+}
+
+model CrmLeadReminderOutbox {
+  id            String               @id @db.Uuid
+  opportunityId String               @map("opportunity_id")
+  recipientId   Int                  @map("recipient_id")
+  step          String
+  payload       Json
+  status        String               @default("prepared")
+  messageId     String?              @map("message_id") @db.Uuid
+  providerState String?              @map("provider_state")
+  reason        String?
+  createdAt     DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime             @default(now()) @map("updated_at") @db.Timestamptz(6)
+  lead          CrmLeadReminderState @relation(fields: [opportunityId], references: [opportunityId], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([status, updatedAt], map: "crm_lead_reminder_outbox_pending_idx")
+  @@map("crm_lead_reminder_outbox")
+}
+
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model Draft {
   sender_number  String   @id

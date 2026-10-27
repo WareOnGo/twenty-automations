@@ -110,6 +110,9 @@ jobs:
             echo "==> Additive CRM migration"
             npm run sync:migrate
 
+            echo "==> Additive reminder migration (sending remains environment-controlled)"
+            npm run reminders:migrate
+
             echo "==> Reload pm2"
             pm2 startOrReload ecosystem.config.cjs --only crm-automations --update-env
             pm2 save

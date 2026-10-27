@@ -5,6 +5,7 @@ import syncRoutes from "./sync.routes.js";
 import morningBriefingRoutes from "./morning-briefing.routes.js";
 import adminBriefingRoutes from "./admin-briefing.routes.js";
 import closureChecklistRoutes from "./closure-checklist.routes.js";
+import leadReminderRoutes from "./lead-reminder.routes.js";
 
 const router = Router();
 
@@ -14,5 +15,6 @@ router.use("/sync", syncRoutes);
 router.use("/morning-briefing", morningBriefingRoutes);
 router.use("/admin-briefing", adminBriefingRoutes);
 router.use("/closure-checklist", closureChecklistRoutes);
+router.use("/lead-reminders", leadReminderRoutes);
 
 export default router;

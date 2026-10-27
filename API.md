@@ -4,7 +4,7 @@
 
 All endpoints accept and return JSON.
 
-Six endpoints, in two groups:
+Seven endpoints:
 
 | Endpoint | Auth | Caller |
 |---|---|---|
@@ -14,10 +14,11 @@ Six endpoints, in two groups:
 | `POST /morning-briefing` | `X-Auth` | pg_cron (`crm-morning-briefing`) |
 | `POST /admin-briefing` | `X-Auth` | pg_cron (`crm-admin-briefing`) |
 | `POST /closure-checklist` | `X-Auth` | manual / trigger |
+| `POST /lead-reminders` | `X-Auth` | preview / explicit reminder tick |
 
 ## Authentication
 
-The four scheduled endpoints require an `X-Auth` header matching `REMINDER_SECRET` in the service env.
+The five guarded endpoints require an `X-Auth` header matching `REMINDER_SECRET` in the service env.
 
 | Response | Meaning |
 |---|---|
@@ -145,13 +146,19 @@ Overlapping runs are prevented twice over — an in-process flag, and a DB-row m
 
 A stream that fails is reported inline as `{"error": "..."}` without aborting the others; its checkpoint records the error and its watermark is not advanced.
 
+When enabled, assignment reminders run after each non-skipped sync and independently
+require a healthy opportunity checkpoint. Notes/tasks failures do not block them.
+A failed stream or reminder run returns HTTP `503` with top-level `status: "partial"`;
+the nested `streams` and `reminders` results identify which part needs attention.
+
 **Response** `202 Accepted` — a run is already in flight, this call was skipped.
 
 ```json
 { "status": "already_running" }
 ```
 
-If the DB-level mutex is held instead, you get `200` with `{"skipped": true, "reason": "locked"}`.
+If the DB-level mutex is held instead, you also get `202`, with `skipped: true`
+and `reason: "locked"` in the response.
 
 ---
 
@@ -262,3 +269,14 @@ Twenty upstream errors are forwarded with Twenty's status code. The controller l
 ```json
 { "error": "Twenty CRM API error: 400" }
 ```
+## Assignment reminder beta
+
+`POST /lead-reminders` uses the existing `X-Auth: <REMINDER_SECRET>` guard.
+An empty JSON body or `{"dispatch":false}` previews current eligible messages
+without writing state or sending. `{"dispatch":true}` performs a tick only when
+`CRM_LEAD_REMINDERS_ENABLED=true`. Unknown fields and non-boolean dispatch values
+are rejected. Partial failures or an unavailable source return HTTP 503.
+
+Non-skipped `/sync` calls also run a dispatch tick when enabled, gated by the
+opportunity checkpoint rather than the notes/tasks result. See
+[configuration, response fields and eligibility](docs/crm-reminder-beta.md).
