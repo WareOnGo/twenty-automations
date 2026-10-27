@@ -10,7 +10,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Unit tests use isolated fakes/PGlite; the E2E harness replaces this with
+      # its guarded disposable DB. No production credentials are provided.
+      DATABASE_URL: postgresql://test:test@127.0.0.1:5432/test
+      DOTENV_CONFIG_PATH: /dev/null
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked dependencies
+        env:
+          PRISMA_SKIP_POSTINSTALL_GENERATE: '1'
+        run: npm ci --no-audit --no-fund
+      - name: Validate and generate Prisma client
+        run: |
+          npx --no-install prisma validate
+          npx --no-install prisma generate
+      - name: Regression tests
+        run: npm test
+      - name: End-to-end dry run (no real messages)
+        run: npm run reminders:dry-run
+
   deploy:
+    needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -78,9 +106,12 @@ jobs:
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
+          DEPLOY_SHA: ${{ github.sha }}
         run: |
-          ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=12 -i ~/.ssh/deploy_key "$EC2_USER@$EC2_HOST" bash <<'REMOTE'
+          ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=12 -i ~/.ssh/deploy_key "$EC2_USER@$EC2_HOST" bash -s -- "$DEPLOY_SHA" <<'REMOTE'
             set -euo pipefail
+            deployment_sha="$1"
+            [[ "$deployment_sha" =~ ^[0-9a-f]{40}$ ]] || exit 1
 
             # Load nvm so node/npm/pm2 are on PATH
             export NVM_DIR="$HOME/.nvm"
@@ -88,9 +119,9 @@ jobs:
 
             cd ~/app
 
-            echo "==> Fetch + reset to origin/main"
-            git fetch --all --prune
-            git reset --hard origin/main
+            echo "==> Fetch + reset to the verified commit"
+            git fetch origin "$deployment_sha"
+            git reset --hard "$deployment_sha"
             git log -1 --oneline
 
             # The 1 GB host previously stalled in @prisma/client postinstall.
@@ -103,9 +134,6 @@ jobs:
             echo "==> Prisma generate"
             NODE_OPTIONS="--max-old-space-size=256" PRISMA_GENERATE_SKIP_AUTOINSTALL=1 \
               timeout 90s npx --no-install prisma generate
-
-            echo "==> Sync regression tests"
-            npm test
 
             echo "==> Additive CRM migration"
             npm run sync:migrate
