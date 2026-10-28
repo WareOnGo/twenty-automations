@@ -14,6 +14,7 @@ The checked-in environment example uses these verified `VerifiedNumber.id` value
 | Maneesh | 12 | Yes | Dhaval and Jayanth |
 | Nihas | 19 | Yes | Dhaval and Jayanth |
 | Raghav | 1 | Yes | Dhaval and Jayanth |
+| Arnav Somani | 14 | Yes | Dhaval and Jayanth |
 | Dhaval | 2 | Yes | None |
 | Jayanth | 5 | Yes | None |
 
@@ -103,7 +104,7 @@ Keep secrets in the deployment environment, never in source control.
 |---|---|
 | `CRM_LEAD_REMINDERS_ENABLED` | Exact `true` enables dispatch; `false` stops new enqueue attempts. |
 | `CRM_REMINDER_NEW_LEADS_FROM` | Fixed source-creation cutoff: `2026-10-27T00:00:00+05:30` or a later activation timestamp. |
-| `CRM_REMINDER_BETA_EMPLOYEE_IDS` | Beta assignees and eligible owners: `12,19,1,2,5`. |
+| `CRM_REMINDER_BETA_EMPLOYEE_IDS` | Beta assignees and eligible owners: `12,19,1,2,5,14`. |
 | `CRM_REMINDER_ESCALATION_EMPLOYEE_IDS` | Escalation recipients: `2,5`. |
 | `CRM_REMINDER_ESCALATION_EXEMPT_EMPLOYEE_IDS` | Assignee sequences that never escalate: `2,5`. |
 | `CRM_REMINDER_ASSIGNEE_MAP` | Exact uppercase Twenty enum to stable DB ID map. |
