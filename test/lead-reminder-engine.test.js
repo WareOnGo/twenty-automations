@@ -159,6 +159,37 @@ test("live completion, deletion or stage exit suppresses a reminder from the sta
   }
 });
 
+test("leads outside intake or deleted do not report irrelevant recipient routing issues", async () => {
+  for (const inactive of [{ stage: "PROPOSAL_SHARED" }, { deletedAt: start }]) {
+    for (const assignedTo of [[], ["UNKNOWN"], ["MANEESH"]]) {
+      const f = fixture(lead({ id: randomUUID(), ...inactive, assignedTo, ownerId: null }));
+      f.people.find(p => p.id === 12).phone_number = "";
+      for (const preview of [true, false]) {
+        const result = await f.run({ preview });
+        assert.equal(result.status, "ok");
+        assert.equal(result.routingIssues, 0);
+        assert.equal(result.queued, 0);
+      }
+      assert.equal(f.sends.length, 0);
+    }
+  }
+});
+
+test("stage exit still finishes assignments and cancels pending retries without a remaining owner", async () => {
+  const f = fixture();
+  f.failures = 1;
+  await f.run();
+  f.at(2);
+  f.record = { ...f.record, stage: "PROPOSAL_SHARED", assignedTo: [], ownerId: null };
+  const result = await f.run();
+  assert.equal(result.status, "ok");
+  assert.equal(result.routingIssues, 0);
+  assert.equal((await repository.state(f.record.id)).assignments[0].finished.reason, "stage_exit");
+  const { rows } = await pg.query("SELECT status FROM crm_lead_reminder_outbox");
+  assert.deepEqual(rows, [{ status: "superseded" }]);
+  assert.equal(f.sends.length, 1);
+});
+
 test("live reassignment cancels the old recipient and gives the new assignee an initial draft", async () => {
   const f = fixture();
   await f.run();

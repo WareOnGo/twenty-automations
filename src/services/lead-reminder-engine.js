@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { isNewLead, reconcileLead, dueNotifications, rosterResolver, assigneeKeys } from "../lib/lead-reminder-policy.js";
+import { isNewLead, reconcileLead, dueNotifications, rosterResolver, assigneeKeys, INTAKE_STAGES } from "../lib/lead-reminder-policy.js";
 import { buildReminderMessage } from "../lib/lead-reminder-messages.js";
 
 const TERMINAL = new Set(["SENT", "EXPIRED", "FAILED", "UNCERTAIN"]);
@@ -54,16 +54,18 @@ export function createReminderEngine({ repository, source, transport, config, cl
               continue;
             }
           }
-          const keys = assigneeKeys(record);
-          result.routingIssues += keys.filter(k => {
-            const person = roster.assignee(k);
-            const assignment = state.assignments.find(a => a.key === k && !a.removedAt);
-            return !person || (config.betaIds.includes(person.id) && !roster.canNotify(person)) ||
-              (assignment?.admitted && !assignment.finished && assignment.employeeId !== person.id);
-          }).length;
-          if (!keys.length) {
-            const owner = roster.owner(record);
-            if (!owner || (config.betaIds.includes(owner.id) && !roster.canNotify(owner))) result.routingIssues++;
+          if (!record.deletedAt && INTAKE_STAGES.includes(record.stage)) {
+            const keys = assigneeKeys(record);
+            result.routingIssues += keys.filter(k => {
+              const person = roster.assignee(k);
+              const assignment = state.assignments.find(a => a.key === k && !a.removedAt);
+              return !person || (config.betaIds.includes(person.id) && !roster.canNotify(person)) ||
+                (assignment?.admitted && !assignment.finished && assignment.employeeId !== person.id);
+            }).length;
+            if (!keys.length) {
+              const owner = roster.owner(record);
+              if (!owner || (config.betaIds.includes(owner.id) && !roster.canNotify(owner))) result.routingIssues++;
+            }
           }
           if (!preview) {
             await repository.save(token, snapshot.data, state);
