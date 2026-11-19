@@ -1,3 +1,4 @@
+import { assignment, memberId, memberFor } from "./assignment-fixture.js";
 import { after, before, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -41,9 +42,9 @@ const config = reminderConfig({
 });
 const people = [[12, "Maneesh"], [19, "Nihas"], [1, "Raghav"], [2, "Dhaval"], [5, "Jayanth"], [6, "Other"]]
   .map(([id, name]) => ({ id, name, is_active: true, phone_number: "+9190000000" + String(id).padStart(2, "0"),
-    twenty_user_id: "member-" + id }));
+    twenty_user_id: memberId(id) }));
 const lead = extra => ({ id: "00000000-0000-4000-8000-000000000001", name: "Synthetic warehouse lead",
-  createdAt: start, stage: "NEW_LEAD", assignedTo: ["MANEESH"], ...extra });
+  createdAt: start, stage: "NEW_LEAD", ...assignment(["MANEESH"]), ...extra });
 
 function fixture(record = lead()) {
   const f = { now: later(0), record, people: structuredClone(people), healthy: true,
@@ -102,7 +103,7 @@ test("0/2/4/8 sequence survives worker restarts and repeated ticks without dupli
 
 test("Dhaval and Jayanth receive exactly three reminders with no escalation of their sequences", async () => {
   for (const name of ["DHAVAL", "JAYANTH"]) {
-    const f = fixture(lead({ id: randomUUID(), assignedTo: [name] }));
+    const f = fixture(lead({ id: randomUUID(), ...assignment([name]) }));
     for (const h of [0, 2, 4, 8]) { f.at(h); await f.run(); }
     assert.equal(f.delivered.size, 3);
     assert.ok(f.sends.every(s => s.payload.text.includes("no management escalation")));
@@ -126,7 +127,7 @@ test("dispatch kill switch is checked before reading or writing any state", asyn
 });
 
 test("historical leads and non-beta assignments never produce notifications", async () => {
-  for (const fields of [{ createdAt: "2025-01-01T00:00:00Z" }, { assignedTo: ["OTHER"] }]) {
+  for (const fields of [{ createdAt: "2025-01-01T00:00:00Z" }, { ...assignment(["OTHER"]) }]) {
     const f = fixture(lead({ id: randomUUID(), ...fields }));
     for (const h of [0, 2, 4, 8]) { f.at(h); await f.run(); }
     assert.equal(f.sends.length, 0);
@@ -134,11 +135,11 @@ test("historical leads and non-beta assignments never produce notifications", as
 });
 
 test("unassigned lead notifies its owner once; assignment starts a new clock later", async () => {
-  const f = fixture(lead({ assignedTo: [], ownerId: "member-1" }));
+  const f = fixture(lead({ ...assignment([]), ownerId: memberId(1) }));
   assert.equal((await f.run()).queued, 1);
   f.at(4);
   assert.equal((await f.run()).queued, 0);
-  f.record = { ...f.record, assignedTo: ["NIHAS"] };
+  f.record = { ...f.record, ...assignment(["NIHAS"]) };
   assert.equal((await f.run()).queued, 1);
   assert.equal((await repository.state(f.record.id)).assignments[0].assignedAt, later(4).toISOString());
   f.at(6);
@@ -162,7 +163,7 @@ test("live completion, deletion or stage exit suppresses a reminder from the sta
 test("leads outside intake or deleted do not report irrelevant recipient routing issues", async () => {
   for (const inactive of [{ stage: "PROPOSAL_SHARED" }, { deletedAt: start }]) {
     for (const assignedTo of [[], ["UNKNOWN"], ["MANEESH"]]) {
-      const f = fixture(lead({ id: randomUUID(), ...inactive, assignedTo, ownerId: null }));
+      const f = fixture(lead({ id: randomUUID(), ...inactive, ...assignment(assignedTo), ownerId: null }));
       f.people.find(p => p.id === 12).phone_number = "";
       for (const preview of [true, false]) {
         const result = await f.run({ preview });
@@ -180,7 +181,7 @@ test("stage exit still finishes assignments and cancels pending retries without 
   f.failures = 1;
   await f.run();
   f.at(2);
-  f.record = { ...f.record, stage: "PROPOSAL_SHARED", assignedTo: [], ownerId: null };
+  f.record = { ...f.record, stage: "PROPOSAL_SHARED", ...assignment([]), ownerId: null };
   const result = await f.run();
   assert.equal(result.status, "ok");
   assert.equal(result.routingIssues, 0);
@@ -194,7 +195,7 @@ test("live reassignment cancels the old recipient and gives the new assignee an 
   const f = fixture();
   await f.run();
   f.at(2);
-  f.live = { ...f.record, assignedTo: ["RAGHAV"] };
+  f.live = { ...f.record, ...assignment(["RAGHAV"]) };
   assert.equal((await f.run()).queued, 1);
   assert.equal(f.sends.at(-1).payload.to, people.find(p => p.id === 1).phone_number);
   assert.match(f.sends.at(-1).payload.text, /Outreach draft/);
@@ -205,7 +206,7 @@ test("an older mirror snapshot cannot undo a live reassignment or reset its cloc
   await f.run();
   f.at(2);
   f.snapshotAt = later(2 - 1 / 6);
-  f.live = { ...f.record, assignedTo: ["RAGHAV"] };
+  f.live = { ...f.record, ...assignment(["RAGHAV"]) };
   await f.run();
   f.at(2 + 1 / 6);
   assert.equal((await f.run()).queued, 0);
@@ -230,7 +231,7 @@ test("a cached snapshot at exactly the live observation timestamp cannot replay 
   const f = fixture();
   await f.run();
   f.at(2); f.snapshotAt = later(2);
-  f.live = { ...f.record, assignedTo: ["RAGHAV"] };
+  f.live = { ...f.record, ...assignment(["RAGHAV"]) };
   assert.equal((await f.run()).queued, 1);
   f.at(2 + 1 / 6);
   assert.equal((await f.run()).queued, 0);
@@ -269,7 +270,7 @@ test("late ticks coalesce old reminders instead of sending a burst after recover
 });
 
 test("an owner's failed notification can resume after quiet hours with the same intent", async () => {
-  const f = fixture(lead({ assignedTo: [], ownerId: "member-1" }));
+  const f = fixture(lead({ ...assignment([]), ownerId: memberId(1) }));
   f.at(10); // 19:00 IST
   f.failures = 1;
   assert.equal((await f.run()).failures, 1);
@@ -305,7 +306,7 @@ test("ambiguous sends stop retrying before the provider can forget their idempot
 });
 
 test("resuming an intent after quiet hours does not restart its 24-hour retry window", async () => {
-  const f = fixture(lead({ assignedTo: [], ownerId: "member-1" }));
+  const f = fixture(lead({ ...assignment([]), ownerId: memberId(1) }));
   f.at(10); f.failures = 1;
   await f.run();
   f.at(12); await f.run();
@@ -317,11 +318,11 @@ test("resuming an intent after quiet hours does not restart its 24-hour retry wi
 });
 
 test("removing an overdue co-assignee cannot escalate the remaining assignee a second time", async () => {
-  const f = fixture(lead({ assignedTo: ["MANEESH", "NIHAS"] }));
+  const f = fixture(lead({ ...assignment(["MANEESH", "NIHAS"]) }));
   await f.run();
   f.at(8);
   assert.equal((await f.run()).queued, 4); // Each assignee has an independent clock/case.
-  f.record = { ...f.record, assignedTo: ["MANEESH"] };
+  f.record = { ...f.record, ...assignment(["MANEESH"]) };
   f.at(9);
   assert.equal((await f.run()).queued, 0);
   assert.equal(f.delivered.size, 6);

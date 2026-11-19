@@ -1,3 +1,4 @@
+import { assigneeIds, WORKSPACE_MEMBER_ID } from "./crm-assignments.js";
 import { createHash } from "node:crypto";
 
 const HOUR = 3_600_000;
@@ -77,11 +78,7 @@ export function occurrenceId(...parts) {
 }
 
 export function assigneeKeys(record) {
-  if (record.assignedTo == null) return [];
-  if (!Array.isArray(record.assignedTo) || record.assignedTo.some(x => typeof x !== "string" || !x.trim())) {
-    throw new Error("INVALID_CRM_ASSIGNEES");
-  }
-  return [...new Set(record.assignedTo.map(x => x.trim().toUpperCase()))].sort();
+  return assigneeIds(record).sort();
 }
 
 export function rosterResolver(rows, config) {
@@ -93,8 +90,7 @@ export function rosterResolver(rows, config) {
   return {
     byId,
     assignee(key) {
-      if (Object.hasOwn(config.aliases || {}, key)) return byId.get(config.aliases[key]) || null;
-      return unique(row => row.name?.trim().split(/\s+/)[0].toUpperCase(), key);
+      return unique(row => row.twenty_user_id?.toLowerCase(), key);
     },
     owner(record) {
       return record.ownerId ? unique(row => row.twenty_user_id, record.ownerId) : null;
@@ -131,6 +127,16 @@ export function reconcileLead(previous, record, roster, config, observedAt) {
   const state = structuredClone(previous || { version: 1, generation: 0, assignments: [], unassigned: null });
   state.observedAt = observedAt;
   const keys = assigneeKeys(record);
+  // Upgrade persisted label keys without resetting T0, generation, occurrence IDs,
+  // completion, or the outbox's deduplication identity. Never match by a name.
+  if (state.version < 2) {
+    for (const assignment of state.assignments) {
+      const id = roster.byId.get(assignment.employeeId)?.twenty_user_id?.toLowerCase();
+      if (!assignment.removedAt && id && WORKSPACE_MEMBER_ID.test(id) && keys.includes(id)
+          && roster.assignee(id)?.id === assignment.employeeId) assignment.key = id;
+    }
+    state.version = 2;
+  }
   const applicable = !record.deletedAt && INTAKE_STAGES.includes(record.stage);
   for (const a of state.assignments) {
     if (!a.removedAt && !keys.includes(a.key)) a.removedAt = observedAt;

@@ -1,11 +1,10 @@
 import OpenAI from "openai";
+import { listRecordsSince } from "./twenty.service.js";
+import { resolveAssigneeNames } from "../lib/crm-assignments.js";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Twenty's `assignedTo` is a multi-select enum. The accepted values are the
-// uppercased first names of the workspace members. Sourced from
-// ASSIGNABLE_USERS env var (comma-separated). Update the env when a teammate
-// is added/removed in Twenty and restart.
+// Allowed intake aliases, resolved against live Workspace Members before writing.
 const ASSIGNABLE_USERS = String(process.env.ASSIGNABLE_USERS || "")
   .split(",")
   .map((u) => u.trim().toUpperCase())
@@ -132,8 +131,8 @@ FIELD INSTRUCTIONS:
     delete parsed.pocPhoneNumber;
   }
 
-  // Validate the LLM-extracted assignTo names against the canonical Twenty
-  // enum. Anything that doesn't map is dropped silently — better to miss an
+  // Validate the LLM-extracted assignTo names against the configured intake
+  // aliases. Anything that doesn't map is dropped silently — better to miss an
   // assignment than to assign the wrong person, per the "be careful" rule.
   const requested = Array.isArray(parsed.assignTo) ? parsed.assignTo : [];
   const seen = new Set();
@@ -146,9 +145,8 @@ FIELD INSTRUCTIONS:
     canonical.push(enumValue);
   }
   delete parsed.assignTo;
-  if (canonical.length) {
-    parsed.assignedTo = canonical;
-  }
+  Object.assign(parsed, resolveAssigneeNames(canonical, canonical.length
+    ? await listRecordsSince("workspaceMembers", { depth: 0 }) : []));
 
   // Twenty's repeatClient is a multi-select enum ["OPTION1", "NO"] (OPTION1 = repeat
   // client, NO = not). The LLM gives us a boolean; map it and drop the boolean — Twenty

@@ -104,8 +104,7 @@ call Twenty or a database; verify production RSS and checkpoint progress after d
 
 - `opportunities.data` retains **every field returned by REST**, including position,
   searchVector, timelineActivities, favorites and new custom fields when returned.
-  `secondaryAssignee` is retained as supplied (including blank/null values); it
-  does not change primary-assignee briefing ownership or the stage activity clock.
+  Both user relations control briefing ownership. Reassignment does not change the stage activity clock.
 - `crm_records` stores complete note/task JSONB, native timestamps, deletion state and
   `opportunity_ids` for joins. Notes linked only to a company/person are retained too.
   `last_note_text` remains a 2,000-character display excerpt; raw note bodies are uncut.
@@ -170,7 +169,7 @@ From `lib/sla.js` — change them there and nowhere else. Days in stage: `<= gre
 
 Negotiation / Agreement Work / Money Collection have no SLA timer yet and render as a plain table. `RFQ_NOT_RELEVANT`, `DEAL_LOST`, `DEAL_CLOSED` and `DEAL_ON_HOLD` are excluded from active tracking entirely.
 
-Deal ownership is **assignee-based** (`assignedTo`), with the owner/creator used only as a fallback when nobody is assigned — so creating a deal doesn't drop it into your briefing. Everyone resolves through the `VerifiedNumber` roster to one canonical lowercased email, so owner, creator and assignee collapse to the same person and never double-count.
+Deal ownership is **based on both user relations** (`primaryAssigneeUserId` and `secondaryAssigneeUserId`), with the owner/creator used only as a fallback when nobody is assigned — so creating a deal doesn't drop it into your briefing. Everyone resolves through the `VerifiedNumber` roster to one canonical lowercased email, so owner, creator and assignee collapse to the same person and never double-count.
 
 ## Setup
 
@@ -203,7 +202,7 @@ Create a `.env` in the project root. See `.env.example` for the full list.
 | `TWENTY_CRM_API_KEY` | yes | Twenty API key (long-lived JWT) |
 | `RESEND_API_KEY` | yes | for briefing emails |
 | `RESEND_FROM` | no | defaults to Resend's sandbox sender |
-| `ASSIGNABLE_USERS` | yes | Comma-separated Twenty `assignedTo` enum values (uppercased first names). Validates names extracted from RFQ messages. Update + restart when the team changes. |
+| `ASSIGNABLE_USERS` | yes | Comma-separated allowed intake names. Explicit names resolve to active Workspace Member IDs before creation; order selects primary then secondary. Update + restart when the team changes. |
 | `REMINDER_SECRET` | yes | Shared secret for the `X-Auth` header on every scheduled endpoint. Must match the value in `sql/pg_cron_*.sql`. Named for the retired reminder system; kept because renaming means changing the prod `.env` and every SQL job at once. |
 
 ### Run
@@ -234,3 +233,21 @@ See [API.md](API.md).
 - **Mail 4 never fires on its own** — it depends on a site-visit-outcome field that doesn't exist in Twenty yet, so `scanClosureTriggers()` returns `[]` and its cron job is commented out. Sending for a specific deal by ID works today.
 - **`sql/drop_legacy_reminder_columns.sql` is written but unrun.** The retired reminder columns still exist physically on `opportunities`; they're no longer modelled in `schema.prisma`.
 - **`toMicros` falls through silently on decimals**, sending e.g. `"50000.50"` straight to Twenty for an opaque API error. The RFQ parser emits integers today, but nothing enforces it.
+
+### User-assignment cutover, 19 November 2026
+
+All assignment reads use `primaryAssigneeUserId` and `secondaryAssigneeUserId`, including
+briefing recipients and reminder routing. Both fields contain Workspace Member IDs.
+`assigned_to` in the mirror is retained as a compatibility column containing the distinct
+user IDs; full names for reporting come from the relation objects in `data`.
+The retired Twenty dropdowns are neither read nor written by active services.
+
+Reminder state upgrades from version 1 to 2 by the existing employee ID binding.
+Existing episode IDs, assignment times, completions and delivery deduplication keys survive.
+The current beta recipient allowlist remains in effect; merely being a secondary assignee
+does not bypass it. Name aliases in `CRM_REMINDER_ASSIGNEE_MAP` are no longer used.
+
+RFQ intake resolves allowed names against live active Workspace Members. The confirmed
+MANOHARI alias maps to S Manohari. Missing/ambiguous users and more than two distinct
+assignees reject the write. `npm run sync:backfill` updates only the mirror and never
+calls the scheduled reminder wrapper. Verification uses mock transports or preview mode.

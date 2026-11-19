@@ -1,3 +1,5 @@
+import { assigneeIds } from "../lib/crm-assignments.js";
+
 // ---------------------------------------------------------------------------
 // Polling-based sync: mirrors Twenty opportunities/notes/tasks into Postgres
 // and computes each deal's "meaningful update" clock ourselves.
@@ -19,7 +21,7 @@
 // Opportunity fields whose change counts as a meaningful (human) update.
 // Allowlist, not denylist: the REST record carries many system fields
 // (searchVector, position, timelineActivities, favorites, updatedAt...) that
-// must never count. Reassignment (assignedTo/ownerId) is intentionally excluded
+// must never count. Reassignment (user relations/ownerId) is intentionally excluded
 // — it is not sales activity on the deal.
 const QUALIFYING_OPP_FIELDS = [
   "stage",
@@ -93,45 +95,21 @@ function changedQualifyingFields(prev, next) {
   return changed;
 }
 
-// Derive who "owns" this deal for briefing/compliance purposes: the people it
-// is ASSIGNED to (Twenty `assignedTo`). The owner/creator (synonymous here —
-// the first-touch POC who logged the deal) is used ONLY as a fallback when
-// there are no assignees, so creating a deal alone never lands it in your
-// briefing. Everything is resolved through the roster maps and lowercased to one
-// canonical email per person; assignees with no roster match fall back to the
-// <firstname>@wareongo.com slug. Deduped.
-function deriveAssigneeEmail(record, { byId, byFirstName }) {
-  const emails = [];
-  const push = (e) => {
-    if (e) emails.push(String(e).trim().toLowerCase());
-  };
-
-  for (const name of record?.assignedTo ?? []) {
-    const key = String(name).trim().toUpperCase();
-    const slug = String(name).replace(/\s+/g, "").toLowerCase();
-    push(byFirstName.get(key) || (slug ? `${slug}@wareongo.com` : null));
-  }
-
-  // Only leads carrying this website backend's reference skip the creator
-  // fallback. Existing integrations retain their behavior, including other
-  // API-created website leads. Explicit owners and assignees always take effect.
-  if (emails.length === 0) {
+// Both user assignments own the briefing. Only genuinely unassigned leads
+// retain the existing owner/creator fallback. Unmapped IDs never become guessed emails.
+function deriveAssigneeEmail(record, { byId }) {
+  const ids = assigneeIds(record);
+  const emails = ids.map(id => byId.get(id)).filter(Boolean);
+  if (!ids.length) {
     const websiteIntake = record?.createdBy?.source === "API" &&
       ["WEBSITE_SEO", "WEBSITE_GOOGLE_ADS"].includes(record?.leadSource) &&
       typeof record?.description === "string" &&
       /^Website reference: website:(?:enquiry|customer_request):\d+(?:\r?\n|$)/.test(record.description);
-    push(byId.get(record?.ownerId) ||
-      (websiteIntake ? null : byId.get(record?.createdBy?.workspaceMemberId)));
+    const email = byId.get(record?.ownerId?.toLowerCase()) ||
+      (websiteIntake ? null : byId.get(record?.createdBy?.workspaceMemberId?.toLowerCase()));
+    if (email) emails.push(email);
   }
-
-  const seen = new Set();
-  const out = [];
-  for (const e of emails) {
-    if (!e || seen.has(e)) continue;
-    seen.add(e);
-    out.push(e);
-  }
-  return out.length ? out.join(",") : null;
+  return [...new Set(emails)].join(",") || null;
 }
 
 function noteText(record) {
@@ -149,27 +127,22 @@ function* batches(items, size) {
   if (batch.length) yield batch;
 }
 
-// Load VerifiedNumber once per run into two lowercased lookups:
-//   byId        : twenty workspace member id -> roster email
-//   byFirstName : UPPERCASE first name       -> roster email
-// Emails are lowercased so stored assigneeEmail is always canonical (the
-// briefing/hygiene queries match case-sensitively). Resolving assignees through
-// the roster (not synthesised slugs) keeps ONE identity per person, so owner,
-// creator, and assignee collapse to the same email and never double-count.
+// Resolve current Workspace Member IDs through the roster; ambiguous IDs fail closed.
 export function createSyncEngine({ prisma, listRecordPages, logger = console }) {
   async function loadMemberMaps() {
     const rows = await prisma.verifiedNumber.findMany({
-      where: { email: { not: null } },
+      where: { email: { not: null }, is_active: true },
       select: { twenty_user_id: true, email: true, name: true },
     });
     const byId = new Map();
-    const byFirstName = new Map();
     for (const r of rows) {
       const email = r.email.trim().toLowerCase();
-      if (r.twenty_user_id) byId.set(r.twenty_user_id, email);
-      if (r.name) byFirstName.set(r.name.trim().split(/\s+/)[0].toUpperCase(), email);
+      if (r.twenty_user_id) {
+        const id = r.twenty_user_id.toLowerCase();
+        byId.set(id, byId.has(id) ? null : email);
+      }
     }
-    return { byId, byFirstName };
+    return { byId };
   }
 
   async function getCheckpoint(object) {
@@ -255,7 +228,8 @@ export function createSyncEngine({ prisma, listRecordPages, logger = console }) 
         priority: rec.priority ?? null,
         city: rec.city ?? null,
         companyName: rec.companyName ?? null,
-        assignedTo: rec.assignedTo ?? null,
+        // Legacy mirror column retained as a compatibility projection of user IDs.
+        assignedTo: assigneeIds(rec),
         ownerId: rec.ownerId ?? null,
         assigneeEmail: deriveAssigneeEmail(rec, memberMaps),
         lastContacted: toDate(rec.lastContacted),

@@ -71,7 +71,8 @@ Parses a natural-language RFQ message into a structured opportunity and creates 
     "city": "Bangalore",
     "repeatClient": ["NO"],
     "description": "Need 5000 sqft warehouse in Bangalore. assign to jayanth",
-    "assignedTo": ["JAYANTH"],
+    "primaryAssigneeUserId": "cea915c7-79f1-4546-9d7f-48f63b683dfd",
+    "secondaryAssigneeUserId": null,
     "createdBy": {
       "source": "MANUAL",
       "workspaceMemberId": "f22c1ae4-2b4b-4408-bd9e-e7d4674cf011",
@@ -102,7 +103,7 @@ Parses a natural-language RFQ message into a structured opportunity and creates 
 | `amount` | object | `{ amountMicros, currencyCode }`. Omitted unless total deal size is explicitly mentioned. Converted to micros before the Twenty call. |
 | `pocName` | object | `{ firstName, lastName }`. Omitted if not mentioned. |
 | `pocPhoneNumber` | object | `{ primaryPhoneNumber, primaryPhoneCallingCode, primaryPhoneCountryCode }`. Omitted if not mentioned. |
-| `assignedTo` | string[] | Set only when the message explicitly asks ("assign to X", "X please handle"). Each value is a Twenty enum (uppercased first name), validated against `ASSIGNABLE_USERS`; unknown names are dropped silently. Field omitted entirely if there's no explicit assignment intent. |
+| `primaryAssigneeUserId` / `secondaryAssigneeUserId` | UUID or null | Explicit permitted intake names resolve against current Workspace Members. First distinct person is primary, second secondary; both null when unassigned. Never core.user IDs. |
 | `createdBy` | object | Set only when `senderNumber` resolved against `VerifiedNumber`. Otherwise Twenty defaults to the API key. |
 
 ### Stage enum
@@ -111,9 +112,9 @@ The parser emits: `NEW_LEAD`, `RFQ_RECEIVED` *(default)*, `RFQ_NOT_RELEVANT`, `P
 
 Twenty's full set, which the mirror and briefings handle: the five above plus `SITE_VISIT`, `NEGOTIATION`, `AGREEMENT_WORK`, `MONEY_COLLECTION`, `DEAL_LOST`, `DEAL_CLOSED`, `DEAL_ON_HOLD`.
 
-### `assignedTo` enum
+### Allowed assignment names
 
-Sourced from the `ASSIGNABLE_USERS` env var. Currently: `DHAVAL`, `JAYANTH`, `NIKESH`, `RANITA`, `MANEESH`, `ARNAV`, `MANOHARI`, `NIHAS`, `RAGHAV`.
+Sourced from the `ASSIGNABLE_USERS` env var. Example intake allowlist: `DHAVAL`, `JAYANTH`, `RANITA`, `MANEESH`, `ARNAV`, `MANOHARI`, `NIHAS`, `RAGHAV`.
 
 ---
 

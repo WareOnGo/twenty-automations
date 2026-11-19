@@ -27,7 +27,7 @@ function record(object, index) {
   const common = { id: `${object}-${index}`, createdAt: at, updatedAt: at, updatedBy: { source: 'API' } };
   if (object !== 'opportunities') return { ...common, bodyV2: { markdown: `Synthetic ${index} `.repeat(300) },
     [object === 'notes' ? 'noteTargets' : 'taskTargets']: [{ targetOpportunityId: `opportunities-${index % count}` }] };
-  return { ...common, name: `Synthetic opportunity ${index}`, stage: 'NEW_LEAD', assignedTo: [],
+  return { ...common, name: `Synthetic opportunity ${index}`, stage: 'NEW_LEAD', primaryAssigneeUserId: null, secondaryAssigneeUserId: null,
     secondaryAssignee: 'SYNTHETIC', timelineActivities: Array.from({ length: 35 }, (_, item) => ({
       id: `activity-${index}-${item}`, createdAt: at, updatedAt: at,
       properties: { title: `Synthetic event ${index}-${item}`, detail: `Synthetic detail ${index}-${item} `.repeat(4) },

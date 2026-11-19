@@ -4,7 +4,7 @@ import { createSyncEngine } from '../src/services/sync-engine.js';
 
 const before = new Date('2026-10-01T00:00:00Z');
 const at = '2026-10-08T00:00:00Z';
-const opportunity = (id, extra={}) => ({id, createdAt:at, updatedAt:at, stage:'NEW_LEAD', ...extra});
+const opportunity = (id, extra={}) => ({id, createdAt:at, updatedAt:at, stage:'NEW_LEAD', primaryAssigneeUserId:null, secondaryAssigneeUserId:null, ...extra});
 const note = (id, extra={}) => ({id, createdAt:at, updatedAt:at, noteTargets:[], ...extra});
 
 const deferred = operation => ({then:(resolve,reject)=>Promise.resolve().then(operation).then(resolve,reject)});
@@ -203,12 +203,12 @@ test('failed stage snapshot rolls back its transition, and retry logs the move o
 
 
 test('secondary assignee changes are retained even without an opportunity timestamp bump',async()=>{
-  const f=fixture({opportunities:[opportunity('o',{secondaryAssignee:'TEAMMATE_A'})]});
+  const f=fixture({opportunities:[opportunity('o',{secondaryAssigneeUserId:'00000000-0000-4000-8000-000000000001'})]});
   await f.runSync();
   const entered=f.state.opportunities.get('o').stageEnteredAt;
-  f.streams.opportunities[0]={...f.streams.opportunities[0],secondaryAssignee:'TEAMMATE_B'};
+  f.streams.opportunities[0]={...f.streams.opportunities[0],secondaryAssigneeUserId:'00000000-0000-4000-8000-000000000002'};
   await f.runSync();
-  assert.equal(f.state.opportunities.get('o').data.secondaryAssignee,'TEAMMATE_B');
+  assert.equal(f.state.opportunities.get('o').data.secondaryAssigneeUserId,'00000000-0000-4000-8000-000000000002');
   assert.equal(f.state.opportunities.get('o').stageEnteredAt.getTime(),entered.getTime());
   assert.equal(f.state.transitions.length,0);
 });
@@ -290,16 +290,16 @@ test('website intake stays unassigned while explicit ownership and other intake 
   const members = [
     { twenty_user_id: 'creator', name: 'Creator', email: 'creator@example.com' },
     { twenty_user_id: 'owner', name: 'Owner', email: 'owner@example.com' },
-    { twenty_user_id: 'ranita', name: 'Ranita', email: 'ranita@example.com' },
+    { twenty_user_id: '00000000-0000-4000-8000-000000000008', name: 'Ranita', email: 'ranita@example.com' },
   ];
-  const intake = { leadSource: 'WEBSITE_SEO', assignedTo: [], ownerId: null,
+  const intake = { leadSource: 'WEBSITE_SEO', primaryAssigneeUserId: null, secondaryAssigneeUserId: null, ownerId: null,
     description: 'Website reference: website:enquiry:42\nSource: homepage',
     createdBy: { source: 'API', workspaceMemberId: 'creator' } };
   const f = fixture({ opportunities: [
     opportunity('seo', intake),
     opportunity('ads', { ...intake, leadSource: 'WEBSITE_GOOGLE_ADS' }),
     opportunity('request', { ...intake, description: 'Website reference: website:customer_request:9007199254740993\nSource: warehouse-request' }),
-    opportunity('assigned', { ...intake, assignedTo: ['RANITA'] }),
+    opportunity('assigned', { ...intake, primaryAssigneeUserId: '00000000-0000-4000-8000-000000000008' }),
     opportunity('owned', { ...intake, ownerId: 'owner' }),
     opportunity('whatsapp', { ...intake, leadSource: 'WHATSAPP_INBOUND' }),
     opportunity('manual', { ...intake, createdBy: { source: 'MANUAL', workspaceMemberId: 'creator' } }),
@@ -313,7 +313,7 @@ test('website intake stays unassigned while explicit ownership and other intake 
   assert.equal(email('owned'), 'owner@example.com');
   assert.equal(email('whatsapp'), 'creator@example.com');
   assert.equal(email('manual'), 'creator@example.com');
-  f.streams.opportunities[0] = opportunity('seo', { ...intake, assignedTo: ['RANITA'] });
+  f.streams.opportunities[0] = opportunity('seo', { ...intake, primaryAssigneeUserId: '00000000-0000-4000-8000-000000000008' });
   await f.runSync();
   assert.equal(email('seo'), 'ranita@example.com');
   f.streams.opportunities[0] = opportunity('seo', intake);
@@ -332,7 +332,7 @@ test('existing website API integrations retain their creator fallback without th
     'Website reference: website:enquiry:42 unrelated text'];
   const records = ['WEBSITE_SEO', 'WEBSITE_GOOGLE_ADS'].flatMap(leadSource =>
     descriptions.map((description, index) => opportunity(`${leadSource}-${index}`, {
-      leadSource, description, assignedTo: [], ownerId: null,
+      leadSource, description, primaryAssigneeUserId: null, secondaryAssigneeUserId: null, ownerId: null,
       createdBy: { source: 'API', workspaceMemberId: 'creator' },
     })));
   const f = fixture({ opportunities: records }, members);
@@ -348,15 +348,15 @@ test('other integrations keep the original assignee, owner, then creator precede
   const members = [
     { twenty_user_id: 'creator', name: 'Creator', email: 'creator@example.com' },
     { twenty_user_id: 'owner', name: 'Owner', email: 'owner@example.com' },
-    { twenty_user_id: 'ranita', name: 'Ranita', email: 'ranita@example.com' },
+    { twenty_user_id: '00000000-0000-4000-8000-000000000008', name: 'Ranita', email: 'ranita@example.com' },
   ];
   const leadSources = ['WHATSAPP_INBOUND', 'OUTREACH', 'EXISTING_CLIENT', 'CLIENT_OWNER_REFERRAL',
     'GODAMWALE', 'GW_REACTIVATION', 'BROKER', 'TOLET_BOARDS', 'WEBSITE_SEO', 'WEBSITE_GOOGLE_ADS'];
   const cases = [
-    { assignedTo: ['RANITA'], ownerId: 'owner', expected: 'ranita@example.com' },
-    { assignedTo: [], ownerId: 'owner', expected: 'owner@example.com' },
-    { assignedTo: [], ownerId: null, expected: 'creator@example.com' },
-    { assignedTo: null, expected: 'creator@example.com' },
+    { primaryAssigneeUserId: '00000000-0000-4000-8000-000000000008', ownerId: 'owner', expected: 'ranita@example.com' },
+    { primaryAssigneeUserId: null, secondaryAssigneeUserId: null, ownerId: 'owner', expected: 'owner@example.com' },
+    { primaryAssigneeUserId: null, secondaryAssigneeUserId: null, ownerId: null, expected: 'creator@example.com' },
+    { primaryAssigneeUserId: null, expected: 'creator@example.com' },
   ];
   const records = leadSources.flatMap(leadSource => cases.map(({ expected, ...ownership }, index) =>
     opportunity(`${leadSource}-${index}`, { leadSource, ...ownership,
@@ -368,4 +368,22 @@ test('other integrations keep the original assignee, owner, then creator precede
       assert.equal(f.state.opportunities.get(`${leadSource}-${index}`).assigneeEmail, expected);
     }
   }
+});
+
+
+test('both user assignments receive briefing attribution once without using stale tags or guessing email', async () => {
+  const primary = '00000000-0000-4000-8000-000000000001';
+  const secondary = '00000000-0000-4000-8000-000000000002';
+  const f = fixture({ opportunities: [opportunity('o', { primaryAssigneeUserId: primary,
+    secondaryAssigneeUserId: secondary, assignedTo: ['STALE'], secondaryAssignee: 'STALE' })] },
+    [{ twenty_user_id: primary, email: 'PRIMARY@example.test' }, { twenty_user_id: secondary, email: 'secondary@example.test' }]);
+  await f.runSync();
+  assert.equal(f.state.opportunities.get('o').assigneeEmail, 'primary@example.test,secondary@example.test');
+  f.streams.opportunities[0].secondaryAssigneeUserId = primary;
+  await f.runSync();
+  assert.equal(f.state.opportunities.get('o').assigneeEmail, 'primary@example.test');
+  f.streams.opportunities[0].primaryAssigneeUserId = '00000000-0000-4000-8000-000000000099';
+  f.streams.opportunities[0].secondaryAssigneeUserId = null;
+  await f.runSync();
+  assert.equal(f.state.opportunities.get('o').assigneeEmail, null);
 });

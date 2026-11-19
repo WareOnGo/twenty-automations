@@ -107,7 +107,7 @@ Keep secrets in the deployment environment, never in source control.
 | `CRM_REMINDER_BETA_EMPLOYEE_IDS` | Beta assignees and eligible owners: `12,19,1,2,5,14`. |
 | `CRM_REMINDER_ESCALATION_EMPLOYEE_IDS` | Escalation recipients: `2,5`. |
 | `CRM_REMINDER_ESCALATION_EXEMPT_EMPLOYEE_IDS` | Assignee sequences that never escalate: `2,5`. |
-| `CRM_REMINDER_ASSIGNEE_MAP` | Exact uppercase Twenty enum to stable DB ID map. |
+| `CRM_REMINDER_ASSIGNEE_MAP` | Deprecated; routing now uses Workspace Member UUIDs and `VerifiedNumber.twenty_user_id`. |
 | `RAMESH_API_URL` | HTTPS origin, currently `https://wareongo-ramesh.duckdns.org`. |
 | `RAMESH_AUTOMATION_API_KEY` | Dedicated outbound API credential; not the interactive agent credential. |
 
@@ -206,3 +206,5 @@ for the scenarios, corrections and limits of this verification.
 
 See [future integrations](crm-reminders-future-integrations.md) for the deliberately
 deferred mailbox, assignment-event and broader PRD work.
+
+Both primary and secondary user relations participate in reminder routing. State version 2 preserves existing delivery identities and clocks when migrating label keys. The configured beta allowlist and escalation exclusions remain unchanged.

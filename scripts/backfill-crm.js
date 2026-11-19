@@ -1,8 +1,10 @@
 import 'dotenv/config';
 import prisma from '../src/lib/prisma.js';
-import { runSync } from '../src/services/sync.service.js';
+import { createSyncEngine } from '../src/services/sync-engine.js';
+import { listRecordPages } from '../src/services/twenty.service.js';
+const { runSync } = createSyncEngine({ prisma, listRecordPages });
 
-// Reads Twenty and writes the mirror only; no briefing/email jobs are called.
+// Mirror-only backfill: bypass the scheduled service wrapper, which also dispatches reminders.
 runSync({full:true})
   .then(result => {
     console.log(JSON.stringify(result));

@@ -1,3 +1,5 @@
+import { assigneeIds } from "../lib/crm-assignments.js";
+
 const MICROS_MULTIPLIER = 1_000_000n;
 
 function toMicros(amountValue) {
@@ -21,10 +23,13 @@ export async function createOpportunityFromData(data) {
     payload.amount = { ...payload.amount, amountMicros: toMicros(payload.amount.amountMicros) };
   }
 
-  // Strip empty assignedTo
-  if (payload.assignedTo === "" || payload.assignedTo == null) {
-    delete payload.assignedTo;
+  // All callers must use the user relations. Never silently write retired tags.
+  if (Object.hasOwn(payload, "assignedTo") || Object.hasOwn(payload, "secondaryAssignee")) {
+    throw new Error("LEGACY_CRM_ASSIGNMENT_WRITE");
   }
+  payload.primaryAssigneeUserId ??= null;
+  payload.secondaryAssigneeUserId ??= null;
+  assigneeIds(payload);
 
   const response = await fetch(`${baseUrl}/rest/opportunities`, {
     method: "POST",

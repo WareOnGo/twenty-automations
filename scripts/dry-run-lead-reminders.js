@@ -15,8 +15,13 @@ const realFetch = globalThis.fetch;
 const baseTime = "2026-10-27T03:30:00.000Z"; // 09:00 IST
 const cutoff = "2026-10-26T18:30:00.000Z";
 const key = "synthetic-local-dry-run-key";
+const memberId = id => `00000000-0000-4000-8000-${String(id).padStart(12, "0")}`;
 const roster = [[12, "Maneesh"], [19, "Nihas"], [1, "Raghav"], [2, "Dhaval"], [5, "Jayanth"], [99, "Other"]]
-  .map(([id, name]) => ({ id, name, phone: "+1999555" + String(id).padStart(4, "0"), member: "member-" + id }));
+  .map(([id, name]) => ({ id, name, phone: "+1999555" + String(id).padStart(4, "0"), member: memberId(id) }));
+const assignment = names => ({
+  primaryAssigneeUserId: names[0] ? roster.find(p => p.name.toUpperCase() === names[0]).member : null,
+  secondaryAssigneeUserId: names[1] ? roster.find(p => p.name.toUpperCase() === names[1]).member : null,
+});
 const phoneToId = new Map(roster.map(p => [p.phone, p.id]));
 const report = { generatedAt: new Date().toISOString(), passed: [], failed: [], timeline: [],
   externalFetchAttempts: 0, realMessagesSent: 0, simulatedRequests: 0, simulatedAccepted: 0 };
@@ -36,7 +41,7 @@ const at = hours => mock.timers.setTime(Date.parse(baseTime) + hours * 3600000);
 const lead = (assignee = "MANEESH", extra = {}) => ({
   id: randomUUID(), name: "Synthetic dry-run lead", createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(), updatedBy: { source: "MANUAL", name: "Synthetic operator" },
-  stage: "NEW_LEAD", assignedTo: assignee ? [assignee] : [], ownerId: null,
+  stage: "NEW_LEAD", ...assignment(assignee ? [assignee] : []), ownerId: null,
   companyName: "Synthetic client", pocName: { firstName: "Test", lastName: "Client" },
   city: "Bengaluru", requirementInSft: 50000, ...extra,
 });
@@ -226,18 +231,18 @@ try {
     assert.deepEqual((await rows()).map(r => r.opportunity_id), [fresh.id]);
     const old = [...live.values()][0];
     live.clear(); live.set(old.id, old); live.set(fresh.id, fresh); live.set(excluded.id, excluded);
-    at(2); update(old, { assignedTo: ["RAGHAV"], stage: "RFQ_RECEIVED" });
+    at(2); update(old, { ...assignment(["RAGHAV"]), stage: "RFQ_RECEIVED" });
     assert.equal((await sync()).queued, 1);
     assert.ok((await rows()).every(r => r.opportunity_id === fresh.id));
     assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM crm_lead_reminder_state`)[0].n, 2);
   });
 
   await scenario("missing assignee notifies actual owner once; assignment starts its clock later", async () => {
-    const record = lead(null, { ownerId: "member-1" }); live.set(record.id, record);
+    const record = lead(null, { ownerId: memberId(1) }); live.set(record.id, record);
     assert.equal((await sync()).queued, 1);
     assert.deepEqual((await rows()).map(r => [r.recipient_id, r.step]), [[1, "owner"]]);
     at(4); assert.equal((await sync()).queued, 0);
-    update(record, { assignedTo: ["NIHAS"] });
+    update(record, { ...assignment(["NIHAS"]) });
     assert.equal((await sync()).queued, 1);
     const [state] = await db.$queryRaw`SELECT state FROM crm_lead_reminder_state WHERE opportunity_id=${record.id}`;
     assert.equal(state.state.assignments[0].assignedAt, new Date().toISOString());
@@ -251,7 +256,7 @@ try {
     live.set(historical.id, historical); live.set(midnight.id, midnight);
     assert.equal((await sync()).queued, 1);
     assert.deepEqual((await rows()).map(r => r.opportunity_id), [midnight.id]);
-    at(2); update(historical, { assignedTo: ["RAGHAV"], stage: "RFQ_RECEIVED" });
+    at(2); update(historical, { ...assignment(["RAGHAV"]), stage: "RFQ_RECEIVED" });
     assert.equal((await sync()).queued, 1); // Only the eligible lead's 2h reminder.
     at(24); // 09:00 IST the next day: eligibility does not roll forward daily.
     const tomorrow = lead("RAGHAV"); live.set(tomorrow.id, tomorrow);
@@ -266,8 +271,8 @@ try {
   });
 
   await scenario("missing owner is reported; creator and non-beta owner are never fallback recipients", async () => {
-    const missing = lead(null, { createdBy: { workspaceMemberId: "member-1" } });
-    const excluded = lead(null, { ownerId: "member-99" });
+    const missing = lead(null, { createdBy: { workspaceMemberId: memberId(1) } });
+    const excluded = lead(null, { ownerId: memberId(99) });
     live.set(missing.id, missing); live.set(excluded.id, excluded);
     const result = await sync("partial");
     assert.equal(result.status, "partial"); assert.equal(result.routingIssues, 1);
@@ -306,11 +311,11 @@ try {
 
   await scenario("reassignment keeps unchanged clocks and stops the removed person's sequence", async () => {
     const record = lead(); live.set(record.id, record); await sync();
-    at(1); update(record, { assignedTo: ["MANEESH", "RAGHAV"] });
+    at(1); update(record, { ...assignment(["MANEESH", "RAGHAV"]) });
     assert.equal((await sync()).queued, 1);
     at(2); assert.equal((await sync()).queued, 1);
     assert.equal(requests.at(-1).recipientId, 12);
-    update(record, { assignedTo: ["RAGHAV"] }); await sync();
+    update(record, { ...assignment(["RAGHAV"]) }); await sync();
     at(3); assert.equal((await sync()).queued, 1); assert.equal(requests.at(-1).recipientId, 1);
     const [row] = await db.$queryRaw`SELECT state FROM crm_lead_reminder_state WHERE opportunity_id=${record.id}`;
     assert.equal(row.state.assignments.length, 2);
@@ -331,7 +336,7 @@ try {
 
   await scenario("live reassignment cannot be undone by an older mirror on a later tick", async () => {
     const record = lead(); live.set(record.id, record); await sync();
-    at(2); overrides.set(record.id, { ...record, assignedTo: ["RAGHAV"] });
+    at(2); overrides.set(record.id, { ...record, ...assignment(["RAGHAV"]) });
     assert.equal((await sync()).queued, 1);
     at(2 + 1 / 6); assert.equal((await tick()).body.queued, 0);
     const [row] = await db.$queryRaw`SELECT state FROM crm_lead_reminder_state WHERE opportunity_id=${record.id}`;
@@ -340,8 +345,8 @@ try {
   });
 
   await scenario("8h escalations exclude a founder who owns or shares assignment of the deal", async () => {
-    const owned = lead("MANEESH", { ownerId: "member-2" });
-    const shared = lead("MANEESH", { assignedTo: ["MANEESH", "JAYANTH"] });
+    const owned = lead("MANEESH", { ownerId: memberId(2) });
+    const shared = lead("MANEESH", { ...assignment(["MANEESH", "JAYANTH"]) });
     live.set(owned.id, owned); live.set(shared.id, shared); await sync();
     at(8); assert.equal((await sync()).queued, 2);
     const escalations = (await rows()).filter(r => r.step === "8");
@@ -466,7 +471,7 @@ try {
   });
 
   await scenario("a failed owner alert resumes after quiet hours without changing its key or text", async () => {
-    at(10); const record = lead(null, { ownerId: "member-1" }); live.set(record.id, record);
+    at(10); const record = lead(null, { ownerId: memberId(1) }); live.set(record.id, record);
     providerMode = "accept_then_drop";
     assert.equal((await sync("partial")).failures, 1);
     const original = structuredClone(requests[0]);
